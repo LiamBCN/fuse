@@ -1,0 +1,92 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Monochrome palette. Light is the default; .dark flips it. */
+:root {
+  --bg: #ffffff;
+  --fg: #1a1a1a;
+  --subtle: #f6f6f6;
+  --muted: #767676;
+  --border: #dddddd;
+}
+
+.dark {
+  --bg: #0a0a0a;
+  --fg: #f4f4f4;
+  --subtle: #161616;
+  --muted: #9a9a9a;
+  --border: #2a2a2a;
+}
+
+html,
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 16px;
+}
+
+/* In the desktop (Electron) app the window has no title bar, so the macOS
+   traffic-light buttons overlay the top-left. Pad the nav past them and make
+   the empty nav area draggable (interactive children stay clickable). */
+.electron nav {
+  padding-left: 5.25rem;
+  padding-top: 2rem;
+  padding-bottom: 0.85rem;
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+.electron nav a,
+.electron nav button,
+.electron nav select,
+.electron nav input {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+/* Recharts: monochrome + theme-aware. SVG attributes can't read CSS vars,
+   so we style the rendered elements here instead of via props. */
+.recharts-cartesian-axis-tick-value {
+  fill: var(--muted);
+}
+.recharts-cartesian-grid line {
+  stroke: var(--border);
+}
+.recharts-line-curve {
+  stroke: var(--fg);
+}
+.recharts-bar-rectangle path {
+  fill: var(--fg);
+}
+.recharts-tooltip-cursor {
+  fill: var(--subtle);
+  stroke: var(--border);
+}
+
+/* Pipeline diagram: flowing dashes along connector lines when active. */
+.fan-flow {
+  stroke-dasharray: 5 5;
+  animation: fanflow 0.5s linear infinite;
+}
+@keyframes fanflow {
+  to {
+    stroke-dashoffset: -10;
+  }
+}
+
+/* Code blocks: monochrome, theme-aware (no syntax colors). */
+.prose pre {
+  background: var(--subtle) !important;
+  border: 1px solid var(--border);
+}
+.prose pre code,
+.prose pre code.hljs {
+  background: transparent;
+  color: var(--fg);
+  padding: 0;
+}

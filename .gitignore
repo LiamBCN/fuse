@@ -1,0 +1,13 @@
+/node_modules
+/.next
+/out
+next-env.d.ts
+*.tsbuildinfo
+npm-debug.log*
+.DS_Store
+
+# Local data — token usage + conversation history are stored here
+/data
+
+# Packaged Electron output
+/dist

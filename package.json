@@ -1,0 +1,64 @@
+{
+  "name": "fuse",
+  "version": "0.1.0",
+  "private": true,
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "next dev -p 3030",
+    "build": "next build",
+    "start": "next start -p 3030",
+    "lint": "next lint",
+    "electron:dev": "concurrently -k -n next,electron -c blue,magenta \"next dev -p 3030\" \"wait-on tcp:127.0.0.1:3030 && electron .\"",
+    "dist": "next build && node electron/prepare.js && electron-builder --mac",
+    "pack": "next build && node electron/prepare.js && electron-builder --mac --dir"
+  },
+  "dependencies": {
+    "highlight.js": "^11.11.1",
+    "next": "14.2.5",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-markdown": "^9.1.0",
+    "recharts": "2.12.7",
+    "rehype-highlight": "^7.0.2",
+    "remark-gfm": "^4.0.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/typography": "^0.5.13",
+    "@types/node": "20.14.10",
+    "@types/react": "18.3.3",
+    "@types/react-dom": "18.3.0",
+    "autoprefixer": "10.4.19",
+    "concurrently": "^10.0.3",
+    "electron": "^42.5.0",
+    "electron-builder": "^26.15.3",
+    "postcss": "8.4.39",
+    "tailwindcss": "3.4.6",
+    "typescript": "5.5.3",
+    "wait-on": "^9.0.10"
+  },
+  "build": {
+    "appId": "com.fuse.app",
+    "productName": "Fuse",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "electron/**/*"
+    ],
+    "afterPack": "electron/after-pack.js",
+    "extraResources": [
+      {
+        "from": ".next/standalone",
+        "to": "app",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.productivity",
+      "icon": "build/icon.icns"
+    }
+  }
+}
