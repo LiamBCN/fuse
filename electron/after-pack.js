@@ -1,13 +1,13 @@
 // electron-builder strips `node_modules` out of directories copied via
 // extraResources. The standalone Next.js server needs its bundled node_modules
 // (it `require`s "next" at runtime), so copy them into the packaged app here,
-// after the bundle is assembled — this bypasses that filter.
+// after the bundle is assembled - this bypasses that filter.
 const fs = require("fs");
 const path = require("path");
 
 exports.default = async function afterPack(context) {
   const src = path.join(__dirname, "..", ".next", "standalone", "node_modules");
-  if (!fs.existsSync(src)) throw new Error(`Missing ${src} — run the build/prepare step first.`);
+  if (!fs.existsSync(src)) throw new Error(`Missing ${src} - run the build/prepare step first.`);
 
   const productName = context.packager.appInfo.productFilename;
   const isMac = context.electronPlatformName === "darwin";

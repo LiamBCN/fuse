@@ -9,7 +9,7 @@ const config: Config = {
   theme: {
     extend: {
       // Monochrome only. Every surface references a CSS variable that flips
-      // between light and dark in globals.css — no per-component color classes.
+      // between light and dark in globals.css - no per-component color classes.
       colors: {
         bg: "var(--bg)",
         fg: "var(--fg)",

@@ -1,5 +1,5 @@
 // Server-side app settings (API keys + model choices). Durable JSON on disk in
-// the writable data dir, so config lives with the app and survives restarts —
+// the writable data dir, so config lives with the app and survives restarts -
 // independent of any single browser/origin's localStorage. Mirrors db.ts.
 import { promises as fs } from "fs";
 import path from "path";

@@ -13,7 +13,7 @@ export async function loadConfig(): Promise<FuseConfig> {
     const res = await fetch("/api/settings", { cache: "no-store" });
     if (res.ok) return mergeConfig(await res.json());
   } catch {
-    /* server unreachable — fall back to a local mirror / defaults */
+    /* server unreachable - fall back to a local mirror / defaults */
   }
   if (typeof window !== "undefined") {
     try {
@@ -41,6 +41,6 @@ export async function saveConfig(cfg: FuseConfig): Promise<void> {
       body: JSON.stringify(cfg),
     });
   } catch {
-    /* offline — local mirror still holds it */
+    /* offline - local mirror still holds it */
   }
 }

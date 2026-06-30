@@ -1,5 +1,5 @@
 // Dead-simple local persistence for token usage. One JSON file on disk under
-// ./data/usage.json. No external DB — "store locally" taken literally.
+// ./data/usage.json. No external DB - "store locally" taken literally.
 import { promises as fs } from "fs";
 import path from "path";
 

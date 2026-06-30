@@ -14,14 +14,21 @@ export interface MoaResult {
   usageItems: UsageItem[];
 }
 
+// Live status of one agent running in parallel.
+export type AgentStatus = { model: string; status: "running" | "done" | "error" };
+
+// Reports pipeline progress: how many stages are done out of total, a label,
+// and (during the parallel agent phase) each agent's live status.
+export type ProgressFn = (done: number, total: number, label: string, agents?: AgentStatus[]) => void;
+
 const AGGREGATOR_SYSTEM = `You are the aggregator in a Mixture-of-Agents system. You have been given a user request along with candidate responses from several different AI models. Your job is to synthesize the single best possible answer.
 
 - Combine the strongest, most correct points from each candidate.
 - Resolve contradictions by reasoning about which is most likely correct.
-- Do not mention that you are aggregating or refer to "the models" or "candidates" — just produce the final answer directly.
+- Do not mention that you are aggregating or refer to "the models" or "candidates" - just produce the final answer directly.
 - Be accurate, complete, and well-organized.`;
 
-const REFINE_SYSTEM = `You are one assistant in a Mixture-of-Agents system. You will see the user request followed by candidate responses from several assistants (including possibly your own). Use them as reference material to produce a single improved response that is more complete, accurate, and well-reasoned than any individual candidate. Do not mention the other responses or that you are refining — just give the best answer to the original request.`;
+const REFINE_SYSTEM = `You are one assistant in a Mixture-of-Agents system. You will see the user request followed by candidate responses from several assistants (including possibly your own). Use them as reference material to produce a single improved response that is more complete, accurate, and well-reasoned than any individual candidate. Do not mention the other responses or that you are refining - just give the best answer to the original request.`;
 
 const peerBlock = (good: Proposal[]) =>
   good.map((p, i) => `### Candidate ${i + 1} (${p.provider}/${p.model})\n${p.content}`).join("\n\n");
@@ -35,6 +42,7 @@ async function runLayer(
   usageItems: UsageItem[],
   peers: Proposal[] | null,
   workdir?: string,
+  onOne?: (i: number, p: ModelRef, error: boolean) => void,
 ): Promise<Proposal[]> {
   const messages: ChatMessage[] = peers
     ? [
@@ -49,7 +57,7 @@ async function runLayer(
     : baseMessages;
 
   return Promise.all(
-    proposers.map(async (p): Promise<Proposal> => {
+    proposers.map(async (p, i): Promise<Proposal> => {
       try {
         const r = await callModel({ provider: p.provider, model: p.model, messages, workdir });
         usageItems.push({
@@ -59,8 +67,10 @@ async function runLayer(
           ...r.usage,
           cost: estimateCost(p.model, r.usage.prompt_tokens, r.usage.completion_tokens),
         });
+        onOne?.(i, p, false);
         return { provider: p.provider, model: p.model, content: r.content, usage: r.usage };
       } catch (e: any) {
+        onOne?.(i, p, true);
         return {
           provider: p.provider,
           model: p.model,
@@ -79,18 +89,31 @@ export async function runMoa(
   aggregator: ModelRef,
   rounds = 1,
   workdir?: string,
+  onProgress?: ProgressFn,
 ): Promise<MoaResult> {
   const usageItems: UsageItem[] = [];
   const layers = Math.max(1, Math.min(rounds, 4)); // clamp to a sane range
 
+  const total = proposers.length + 1; // every agent + the final fuse
+  let done = 0;
+  const agents: AgentStatus[] = proposers.map((p) => ({ model: p.model, status: "running" }));
+  const snap = () => agents.map((a) => ({ ...a }));
+  onProgress?.(0, total, `${proposers.length} agents working in parallel…`, snap());
+  const bump = (i: number, _p: ModelRef, error: boolean) => {
+    done++;
+    if (agents[i]) agents[i].status = error ? "error" : "done";
+    onProgress?.(done, total, `${done}/${proposers.length} agents answered`, snap());
+  };
+
   // Layer 1: independent answers. Each extra layer feeds the previous answers
   // back to every proposer to refine (the layered Mixture-of-Agents pattern).
-  let proposals = await runLayer(proposers, messages, usageItems, null, workdir);
+  let proposals = await runLayer(proposers, messages, usageItems, null, workdir, bump);
   for (let layer = 2; layer <= layers; layer++) {
     const prev = proposals.filter((p) => !p.error && p.content.trim());
     if (prev.length === 0) break; // nothing to refine from
     proposals = await runLayer(proposers, messages, usageItems, prev, workdir);
   }
+  onProgress?.(proposers.length, total, "Fusing answers…", snap());
 
   const good = proposals.filter((p) => !p.error && p.content.trim());
   const userTurn = [...messages].reverse().find((m) => m.role === "user")?.content ?? "";
@@ -126,5 +149,6 @@ export async function runMoa(
     cost: estimateCost(aggregator.model, agg.usage.prompt_tokens, agg.usage.completion_tokens),
   });
 
+  onProgress?.(total, total, "Done");
   return { final: agg.content, proposals, usageItems };
 }

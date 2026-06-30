@@ -9,8 +9,8 @@
     "start": "next start -p 3030",
     "lint": "next lint",
     "electron:dev": "concurrently -k -n next,electron -c blue,magenta \"next dev -p 3030\" \"wait-on tcp:127.0.0.1:3030 && electron .\"",
-    "dist": "next build && node electron/prepare.js && electron-builder --mac",
-    "pack": "next build && node electron/prepare.js && electron-builder --mac --dir"
+    "dist": "next build && node electron/prepare.js && node electron/build-voice.js && electron-builder --mac",
+    "pack": "next build && node electron/prepare.js && node electron/build-voice.js && electron-builder --mac --dir"
   },
   "dependencies": {
     "highlight.js": "^11.11.1",
@@ -53,12 +53,20 @@
         "filter": [
           "**/*"
         ]
+      },
+      {
+        "from": "electron/voice/fuse-transcribe",
+        "to": "voice/fuse-transcribe"
       }
     ],
     "mac": {
       "target": "dmg",
       "category": "public.app-category.productivity",
-      "icon": "build/icon.icns"
+      "icon": "build/icon.icns",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Fuse uses the microphone for voice input (dictation into the chat box).",
+        "NSSpeechRecognitionUsageDescription": "Fuse transcribes your voice on-device to text using Apple Speech."
+      }
     }
   }
 }

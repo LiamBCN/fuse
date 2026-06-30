@@ -8,7 +8,7 @@ import { promises as fs } from "fs";
 import { accessSync, constants, existsSync } from "fs";
 import os from "os";
 import path from "path";
-import type { CallResult, ChatMessage } from "./providers";
+import type { ActivityFn, CallResult, ChatMessage } from "./providers";
 
 const HOME = os.homedir();
 
@@ -84,39 +84,89 @@ function render(messages: ChatMessage[]): { system: string; prompt: string } {
   return { system, prompt };
 }
 
-const TIMEOUT_MS = 180_000;
+const num = (v: string | undefined, d: number) => {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : d;
+};
 
-// Spawn a process, optionally feed stdin, and collect stdout/stderr.
+// We deliberately do NOT cap total runtime tightly. A real plan can reason and
+// research for many minutes - sometimes far longer - and killing it mid-thought
+// is the bug we're fixing. Instead we watch for *silence*: a healthy CLI streams
+// output the whole time it works, so if nothing at all has been emitted for
+// IDLE_TIMEOUT_MS the process is almost certainly wedged and we kill it then -
+// not while it's still making progress. A generous absolute backstop guards
+// against a truly runaway process. Both are env-tunable.
+const IDLE_TIMEOUT_MS = num(process.env.FUSE_CLI_IDLE_TIMEOUT_MS, 300_000); // 5 min of total silence
+const MAX_TIMEOUT_MS = num(process.env.FUSE_CLI_MAX_TIMEOUT_MS, 3_600_000); // 60 min hard backstop
+
+interface RunOpts {
+  // Called with every raw stdout/stderr chunk - used for liveness/progress.
+  onData?: (chunk: string) => void;
+}
+
+// Spawn a process, optionally feed stdin, and collect stdout/stderr. Times out
+// only on prolonged silence (see above), so long-but-active work is never killed.
 function run(
   bin: string,
   args: string[],
   stdin: string | null,
   cwd: string,
+  opts: RunOpts = {},
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(bin, args, { cwd, env: childEnv() });
     let stdout = "";
     let stderr = "";
-    const timer = setTimeout(() => {
+    let settled = false;
+
+    let idleTimer: ReturnType<typeof setTimeout>;
+    const done = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(idleTimer);
+      clearTimeout(maxTimer);
+      fn();
+    };
+    const fail = (msg: string) => {
       child.kill("SIGKILL");
-      reject(new Error(`Timed out after ${TIMEOUT_MS / 1000}s`));
-    }, TIMEOUT_MS);
+      done(() => reject(new Error(msg)));
+    };
+    const resetIdle = () => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(
+        () => fail(`No output for ${Math.round(IDLE_TIMEOUT_MS / 1000)}s - the CLI appears stuck.`),
+        IDLE_TIMEOUT_MS,
+      );
+    };
+    const maxTimer = setTimeout(
+      () => fail(`Exceeded the ${Math.round(MAX_TIMEOUT_MS / 1000)}s hard limit.`),
+      MAX_TIMEOUT_MS,
+    );
+    resetIdle();
 
-    child.stdout.on("data", (d) => (stdout += d));
-    child.stderr.on("data", (d) => (stderr += d));
-    child.on("error", (e) => {
-      clearTimeout(timer);
-      reject(e);
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      if (code === 0) resolve({ stdout, stderr });
-      else reject(new Error(stderr.trim() || stdout.trim() || `exited with code ${code}`));
-    });
+    // Every chunk is a sign of life: reset the idle clock and feed liveness.
+    const onChunk = (d: unknown) => {
+      const s = String(d);
+      resetIdle();
+      try {
+        opts.onData?.(s);
+      } catch {
+        /* never let a progress callback break the run */
+      }
+      return s;
+    };
+    child.stdout.on("data", (d) => (stdout += onChunk(d)));
+    child.stderr.on("data", (d) => (stderr += onChunk(d)));
+    child.on("error", (e) => done(() => reject(e)));
+    child.on("close", (code) =>
+      done(() =>
+        code === 0
+          ? resolve({ stdout, stderr })
+          : reject(new Error(stderr.trim() || stdout.trim() || `exited with code ${code}`)),
+      ),
+    );
 
-    if (stdin != null) {
-      child.stdin.write(stdin);
-    }
+    if (stdin != null) child.stdin.write(stdin);
     child.stdin.end();
   });
 }
@@ -130,29 +180,87 @@ async function pickCwd(workdir?: string): Promise<{ cwd: string; scoped: boolean
   return { cwd: WORKDIR, scoped: false };
 }
 
-async function runClaude(model: string, messages: ChatMessage[], workdir?: string): Promise<CallResult> {
+async function runClaude(
+  model: string,
+  messages: ChatMessage[],
+  workdir?: string,
+  planMode?: boolean,
+  onActivity?: ActivityFn,
+): Promise<CallResult> {
   const bin = resolveBin("claude", CLAUDE_CANDIDATES);
   if (!bin) throw new Error("Claude CLI not found. Install it or set FUSE_CLAUDE_BIN.");
   const { system, prompt } = render(messages);
   const { cwd, scoped } = await pickCwd(workdir);
 
-  const args = ["-p", "--output-format", "json", "--model", model || "sonnet"];
+  // stream-json + partial messages → the CLI emits one JSON event per line and
+  // streams the answer token-by-token. That gives us a real heartbeat (so the
+  // idle timeout only fires when genuinely stuck) and a live progress signal.
+  const args = ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages"];
+  // "default"/empty → let the CLI use its own default model (future-proof).
+  if (model && model !== "default") args.push("--model", model);
   if (system) args.push("--append-system-prompt", system);
-  if (scoped) {
-    // Full access to the folder — all tools, edits, and shell — like running
+  if (scoped && planMode) {
+    // Plan mode: read the folder AND create plan files (Markdown/notes) via
+    // Write - but no Edit or Bash, so it can't surgically edit existing source
+    // or run commands.
+    args.push("--max-turns", "40", "--allowedTools", "Read", "Glob", "Grep", "Write");
+  } else if (scoped) {
+    // Full access to the folder - all tools, edits, and shell - like running
     // `claude` in that directory and approving everything.
     args.push("--max-turns", "60", "--permission-mode", "bypassPermissions");
   } else {
-    args.push("--max-turns", "1");
+    // No folder: a pure text answer - plan synthesis (review/harden/finalize) or
+    // plain chat. Force `default` permission mode so the model can't auto-run
+    // tools. Otherwise, when the user's global config defaults to
+    // bypassPermissions, the aggregator wanders off running Bash/Read/grep to
+    // "verify the codebase" the plan mentions, burns the turn budget, and fails
+    // with error_max_turns instead of producing the plan. With no tools it just
+    // writes the answer in a single turn.
+    args.push("--max-turns", "8", "--permission-mode", "default");
   }
 
-  const { stdout } = await run(bin, args, prompt, cwd);
-  let data: any;
-  try {
-    data = JSON.parse(stdout);
-  } catch {
-    throw new Error(`Unexpected claude output: ${stdout.slice(0, 200)}`);
+  // Live progress: count assistant text as it streams in. JSON objects are
+  // line-delimited, so buffer across chunk boundaries before parsing.
+  let streamed = 0;
+  let buf = "";
+  const onData: RunOpts["onData"] = onActivity
+    ? (chunk) => {
+        buf += chunk;
+        let nl: number;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line.startsWith("{")) continue;
+          try {
+            const ev = JSON.parse(line);
+            const inner = ev?.type === "stream_event" ? ev.event : null;
+            if (inner?.type === "content_block_delta" && inner.delta?.type === "text_delta" && inner.delta.text) {
+              streamed += inner.delta.text.length;
+              onActivity({ chars: streamed });
+            }
+          } catch {
+            /* partial or non-event line */
+          }
+        }
+      }
+    : undefined;
+
+  const { stdout } = await run(bin, args, prompt, cwd, { onData });
+
+  // The final `result` event carries the answer + usage (same shape the old
+  // --output-format json returned at the top level).
+  let data: any = null;
+  for (const line of stdout.split("\n")) {
+    const s = line.trim();
+    if (!s.startsWith("{")) continue;
+    try {
+      const ev = JSON.parse(s);
+      if (ev?.type === "result") data = ev;
+    } catch {
+      /* skip non-JSON / partial lines */
+    }
   }
+  if (!data) throw new Error(`Unexpected claude output: ${stdout.slice(0, 200)}`);
   if (data.is_error) throw new Error(data.result || "claude CLI error");
 
   const u = data.usage ?? {};
@@ -167,7 +275,13 @@ async function runClaude(model: string, messages: ChatMessage[], workdir?: strin
 
 let codexSeq = 0;
 
-async function runCodex(model: string, messages: ChatMessage[], workdir?: string): Promise<CallResult> {
+async function runCodex(
+  model: string,
+  messages: ChatMessage[],
+  workdir?: string,
+  _planMode?: boolean,
+  onActivity?: ActivityFn,
+): Promise<CallResult> {
   const bin = resolveBin("codex", CODEX_CANDIDATES);
   if (!bin) throw new Error("Codex CLI not found. Install it or set FUSE_CODEX_BIN.");
   const { system, prompt } = render(messages);
@@ -177,15 +291,28 @@ async function runCodex(model: string, messages: ChatMessage[], workdir?: string
   // Keep the output file out of the (possibly user-owned) folder.
   await fs.mkdir(WORKDIR, { recursive: true });
   const outFile = path.join(WORKDIR, `codex-${Date.now()}-${codexSeq++}.txt`);
-  // With a folder: full workspace access (read/edit/run within it). Without:
-  // read-only in a neutral dir (plain chat).
+  // Folder set → workspace-write so it can create plan files (and, in normal
+  // chat, implement). No folder → read-only.
   const sandbox = scoped ? "workspace-write" : "read-only";
-  const args = ["exec", "--skip-git-repo-check", "--sandbox", sandbox, "-C", cwd, "-o", outFile];
+  // medium reasoning is plenty and far faster - Codex's default (xhigh) can
+  // take minutes on long answers and blow past the timeout.
+  const args = ["exec", "--skip-git-repo-check", "--sandbox", sandbox, "-C", cwd, "-o", outFile, "-c", "model_reasoning_effort=medium"];
   if (model && model !== "default") args.push("-m", model);
   args.push(full);
 
+  // Codex prints its reasoning/progress to stdout+stderr as it works, so the
+  // running byte count is a fine "still alive" signal (the answer itself is read
+  // from outFile below).
+  let streamed = 0;
+  const onData: RunOpts["onData"] = onActivity
+    ? (chunk) => {
+        streamed += chunk.length;
+        onActivity({ chars: streamed });
+      }
+    : undefined;
+
   try {
-    await run(bin, args, null, cwd);
+    await run(bin, args, null, cwd, { onData });
     const content = (await fs.readFile(outFile, "utf8")).trim();
     return {
       content,
@@ -205,8 +332,64 @@ export async function runCli(
   model: string,
   messages: ChatMessage[],
   workdir?: string,
+  planMode?: boolean,
+  onActivity?: ActivityFn,
 ): Promise<CallResult> {
   return provider === "claude-cli"
-    ? runClaude(model, messages, workdir)
-    : runCodex(model, messages, workdir);
+    ? runClaude(model, messages, workdir, planMode, onActivity)
+    : runCodex(model, messages, workdir, planMode, onActivity);
+}
+
+// --- Setup / health checks --------------------------------------------------
+// Used by the first-run setup gate so a new user can confirm their machine is
+// ready before using Fuse.
+export interface CliStatus {
+  ok: boolean;
+  path: string | null;
+  version?: string;
+  error?: string;
+}
+
+// Spawn `<bin> --version` with a short timeout to confirm the CLI is not just
+// present but actually runnable.
+function probeVersion(bin: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(bin, ["--version"], { env: childEnv() });
+    let out = "";
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error("Timed out running --version"));
+    }, 10_000);
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (out += d));
+    child.on("error", (e) => {
+      clearTimeout(timer);
+      reject(e);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve(out.trim());
+      else reject(new Error(out.trim() || `exited with code ${code}`));
+    });
+  });
+}
+
+async function probeCli(name: string, candidates: (string | undefined)[]): Promise<CliStatus> {
+  const bin = resolveBin(name, candidates);
+  if (!bin) return { ok: false, path: null };
+  try {
+    const out = await probeVersion(bin);
+    return { ok: true, path: bin, version: out.split("\n")[0].slice(0, 100) };
+  } catch (e: any) {
+    // Found on disk but won't run (broken install, perms, etc.).
+    return { ok: false, path: bin, error: e?.message ?? String(e) };
+  }
+}
+
+export async function detectClis(): Promise<{ claude: CliStatus; codex: CliStatus }> {
+  const [claude, codex] = await Promise.all([
+    probeCli("claude", CLAUDE_CANDIDATES),
+    probeCli("codex", CODEX_CANDIDATES),
+  ]);
+  return { claude, codex };
 }

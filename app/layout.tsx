@@ -1,9 +1,10 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import Nav from "@/components/Nav";
+import SetupGate from "@/components/SetupGate";
 
 export const metadata: Metadata = {
-  title: "Fuse — Mixture of Agents",
+  title: "Fuse - Mixture of Agents",
   description: "Ask multiple AI models, fuse their answers into one.",
 };
 
@@ -18,8 +19,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <script dangerouslySetInnerHTML={{ __html: themeInit }} />
       </head>
       <body className="flex h-screen flex-col bg-bg text-fg antialiased">
-        <Nav />
-        <main className="flex-1 overflow-hidden">{children}</main>
+        <SetupGate>
+          <Nav />
+          <main className="flex-1 overflow-hidden">{children}</main>
+        </SetupGate>
       </body>
     </html>
   );

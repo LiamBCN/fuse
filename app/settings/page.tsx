@@ -8,12 +8,20 @@ export default function SettingsPage() {
   const [cfg, setCfg] = useState<FuseConfig | null>(null);
   const [saved, setSaved] = useState(false);
   const [hasPicker, setHasPicker] = useState(false);
+  const [notifPerm, setNotifPerm] = useState<string>("default");
 
   useEffect(() => {
     loadConfig().then(setCfg);
     setHasPicker(typeof window !== "undefined" && !!(window as any).fuse?.chooseFolder);
+    if (typeof Notification !== "undefined") setNotifPerm(Notification.permission);
   }, []);
   if (!cfg) return null;
+
+  async function enableNotifications() {
+    if (typeof Notification === "undefined") return;
+    const p = await Notification.requestPermission();
+    setNotifPerm(p);
+  }
 
   function update(next: FuseConfig) {
     setCfg(next);
@@ -47,13 +55,13 @@ export default function SettingsPage() {
       <h1 className="text-4xl font-semibold tracking-tight">Settings</h1>
       <p className="mt-3 text-lg text-muted">
         Fuse runs your locally-installed <span className="font-medium text-fg">Claude</span> and{" "}
-        <span className="font-medium text-fg">Codex</span> CLIs via your subscription logins — no API
+        <span className="font-medium text-fg">Codex</span> CLIs via your subscription logins - no API
         keys, no metered cost.
       </p>
 
       <Section
         title="Working folder"
-        subtitle="Optional. When set, the agents get full access to this folder — read, edit, and run commands — exactly like opening a terminal and running claude / codex inside it. Leave empty for plain chat with no file access."
+        subtitle="Optional. When set, the agents get full access to this folder - read, edit, and run commands - exactly like opening a terminal and running claude / codex inside it. Leave empty for plain chat with no file access."
       >
         <div className="flex gap-3">
           <input
@@ -90,7 +98,7 @@ export default function SettingsPage() {
 
       <Section
         title="Agents"
-        subtitle="These all answer in parallel. Pick a model per agent."
+        subtitle="These all answer in parallel. Pick a model per agent - or type your own. Tip: use “default” or a tier alias (sonnet/opus/haiku) so it keeps working when providers update their models."
         action={
           <div className="flex items-center gap-4">
             <button onClick={resetModels} className="text-base text-muted underline hover:text-fg">Reset</button>
@@ -117,6 +125,31 @@ export default function SettingsPage() {
 
       <Section title="Aggregator" subtitle="Reads every agent's answer and writes the final fused reply.">
         <ModelPicker value={cfg.aggregator} onChange={(r) => update({ ...cfg, aggregator: r })} />
+      </Section>
+
+      <Section title="Notifications" subtitle="Play a sound + show a desktop alert when an agent needs input, or when a long task finishes while Fuse isn't focused.">
+        <div className="flex items-center justify-between gap-4">
+          <button
+            onClick={() => update({ ...cfg, notifications: !cfg.notifications })}
+            role="switch"
+            aria-checked={cfg.notifications}
+            className={`relative h-7 w-12 shrink-0 rounded-full transition ${cfg.notifications ? "bg-fg" : "bg-border"}`}
+          >
+            <span
+              className={`absolute top-1 h-5 w-5 rounded-full bg-bg transition-all ${cfg.notifications ? "left-6" : "left-1"}`}
+            />
+          </button>
+          <span className="flex-1 text-base">{cfg.notifications ? "Notifications on" : "Notifications off"}</span>
+          {notifPerm === "granted" ? (
+            <span className="text-sm text-muted">macOS: allowed</span>
+          ) : notifPerm === "denied" ? (
+            <span className="text-right text-sm text-muted">Blocked - enable in System&nbsp;Settings ▸ Notifications ▸ Fuse</span>
+          ) : (
+            <button onClick={enableNotifications} className="rounded-full border border-border px-4 py-2 text-sm hover:border-fg">
+              Allow…
+            </button>
+          )}
+        </div>
       </Section>
 
       <div className="h-12" />

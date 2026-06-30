@@ -5,9 +5,9 @@ import {
 } from "recharts";
 
 interface UsageData {
-  totals: { tokens: number; cost: number; calls: number; conversations: number };
-  daily: { day: string; tokens: number; cost: number }[];
-  models: { model: string; tokens: number; cost: number; calls: number }[];
+  totals: { tokens: number; input: number; output: number; calls: number; conversations: number };
+  daily: { day: string; tokens: number }[];
+  models: { model: string; input: number; output: number; tokens: number; calls: number }[];
 }
 
 // Monochrome bars: same fill (CSS var) with descending opacity for separation.
@@ -37,6 +37,9 @@ export default function StatsPage() {
   return (
     <div className="mx-auto h-full max-w-4xl overflow-y-auto px-6 py-12">
       <h1 className="text-4xl font-semibold tracking-tight">Token usage</h1>
+      <p className="mt-2 text-muted">
+        Fuse runs on your local CLI subscriptions - these are token counts, not billed costs.
+      </p>
 
       {empty ? (
         <div className="mt-16 rounded-3xl border border-border p-16 text-center text-lg text-muted">
@@ -46,7 +49,7 @@ export default function StatsPage() {
         <>
           <div className="mt-10 grid grid-cols-2 gap-4 sm:grid-cols-4">
             <Stat label="Total tokens" value={data.totals.tokens.toLocaleString()} />
-            <Stat label="Est. cost" value={`$${data.totals.cost.toFixed(4)}`} />
+            <Stat label="Output tokens" value={data.totals.output.toLocaleString()} />
             <Stat label="Model calls" value={data.totals.calls.toLocaleString()} />
             <Stat label="Conversations" value={data.totals.conversations.toLocaleString()} />
           </div>
@@ -85,8 +88,9 @@ export default function StatsPage() {
                 <tr>
                   <th className="py-3">Model</th>
                   <th className="py-3 text-right">Calls</th>
-                  <th className="py-3 text-right">Tokens</th>
-                  <th className="py-3 text-right">Est. cost</th>
+                  <th className="py-3 text-right">Input</th>
+                  <th className="py-3 text-right">Output</th>
+                  <th className="py-3 text-right">Total</th>
                 </tr>
               </thead>
               <tbody>
@@ -94,8 +98,9 @@ export default function StatsPage() {
                   <tr key={m.model} className="border-t border-border">
                     <td className="py-3">{m.model}</td>
                     <td className="py-3 text-right text-muted">{m.calls}</td>
+                    <td className="py-3 text-right text-muted">{m.input.toLocaleString()}</td>
+                    <td className="py-3 text-right text-muted">{m.output.toLocaleString()}</td>
                     <td className="py-3 text-right">{m.tokens.toLocaleString()}</td>
-                    <td className="py-3 text-right text-muted">${m.cost.toFixed(4)}</td>
                   </tr>
                 ))}
               </tbody>

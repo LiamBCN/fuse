@@ -6,8 +6,11 @@ next-env.d.ts
 npm-debug.log*
 .DS_Store
 
-# Local data — token usage + conversation history are stored here
+# Local data - token usage + conversation history are stored here
 /data
 
 # Packaged Electron output
 /dist
+
+# Compiled on-device voice transcriber (built by electron/build-voice.js)
+/electron/voice/fuse-transcribe

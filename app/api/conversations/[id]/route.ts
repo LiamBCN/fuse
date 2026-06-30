@@ -4,7 +4,7 @@ import { getConversation, deleteConversation } from "@/lib/conversation-store";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// GET /api/conversations/:id — fetch one full conversation (with proposals).
+// GET /api/conversations/:id - fetch one full conversation (with proposals).
 export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
   try {
     const conv = await getConversation(params.id);
@@ -15,7 +15,7 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
   }
 }
 
-// DELETE /api/conversations/:id — remove one conversation.
+// DELETE /api/conversations/:id - remove one conversation.
 export async function DELETE(_req: NextRequest, { params }: { params: { id: string } }) {
   try {
     await deleteConversation(params.id);

@@ -50,7 +50,7 @@ function deriveTitle(turns: Turn[]): string {
   return withAtt ? "Attachment-only message" : "New conversation";
 }
 
-// fileText is the inlined contents of attached files — large and only ever sent
+// fileText is the inlined contents of attached files - large and only ever sent
 // to the models, never displayed. Drop it before persisting.
 const strip = (turns: Turn[]): Turn[] => turns.map(({ fileText, ...rest }) => rest);
 
@@ -69,12 +69,19 @@ export async function upsertConversation(input: { id: string; turns: Turn[] }): 
   const all = await readAll();
   const existing = all.find((c) => c.id === input.id);
   const now = Date.now();
+  const turns = strip(input.turns);
+  // Opening/restoring a conversation re-saves identical content. That must NOT
+  // bump updatedAt or reorder history - otherwise just viewing a chat jumps it to
+  // the top. Only persist (and re-sort) when the content actually changed.
+  if (existing && JSON.stringify(existing.turns) === JSON.stringify(turns)) {
+    return existing;
+  }
   const record: StoredConversation = {
     id: input.id,
     title: deriveTitle(input.turns),
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
-    turns: strip(input.turns),
+    turns,
   };
   await writeAll([record, ...all.filter((c) => c.id !== input.id)]);
   return record;

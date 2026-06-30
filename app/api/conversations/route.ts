@@ -5,7 +5,7 @@ import type { Turn } from "@/lib/types";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// GET /api/conversations — list all conversations (newest first).
+// GET /api/conversations - list all conversations (newest first).
 export async function GET() {
   try {
     return NextResponse.json(await listConversations());
@@ -14,7 +14,7 @@ export async function GET() {
   }
 }
 
-// POST /api/conversations — create or update one conversation.
+// POST /api/conversations - create or update one conversation.
 export async function POST(req: NextRequest) {
   let body: { id?: string; turns?: Turn[] };
   try {

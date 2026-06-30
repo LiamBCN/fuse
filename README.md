@@ -7,7 +7,7 @@ usage locally with charts.
 
 ## Stack
 
-- **Next.js 14** (App Router) — frontend **and** backend (API routes). One process.
+- **Next.js 14** (App Router) - frontend **and** backend (API routes). One process.
 - **React + Tailwind** UI, **Recharts** for stats.
 - **Electron** wrapper → ships as a double-clickable `Fuse.app` (no terminal).
 - Provider adapters for Anthropic, OpenAI, xAI, Google, and OpenRouter.
@@ -21,7 +21,7 @@ npm run dist        # builds dist/Fuse-<version>-arm64.dmg
 ```
 
 Open the `.dmg`, drag **Fuse** to Applications, launch it. It starts its own
-server internally and opens a native window — nothing to run in a terminal.
+server internally and opens a native window - nothing to run in a terminal.
 (The app is ad-hoc signed, not notarized, so the first launch may need
 right-click → **Open** to get past Gatekeeper.)
 
@@ -30,7 +30,7 @@ right-click → **Open** to get past Gatekeeper.)
 ```bash
 npm install
 npm run dev            # http://localhost:3030
-# or: npm run electron:dev   — dev server + Electron window with live reload
+# or: npm run electron:dev   - dev server + Electron window with live reload
 ```
 
 1. Go to **Settings** → paste the API keys for whichever providers you want.
@@ -58,7 +58,7 @@ better answers when they can see other models' answers first.
 Config (API keys + model choices), conversations, and token usage are stored as
 JSON on disk:
 
-- **Packaged app:** `~/Library/Application Support/fuse/data/` — `settings.json`,
+- **Packaged app:** `~/Library/Application Support/fuse/data/` - `settings.json`,
   `conversations.json`, `usage.json`, plus `port.json` (the app reuses one
   stable local port so its origin/localStorage stay consistent across launches).
 - **Dev (`npm run dev`):** `./data/` in the repo.

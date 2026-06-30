@@ -44,7 +44,7 @@ export async function deleteConversation(id: string): Promise<void> {
   await fetch(`/api/conversations/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
-// The conversation the chat page should restore on load — a local UI pointer.
+// The conversation the chat page should restore on load - a local UI pointer.
 export function loadActiveId(): string | null {
   if (!hasWindow()) return null;
   try {

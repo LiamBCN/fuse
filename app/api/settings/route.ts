@@ -4,7 +4,7 @@ import { readSettings, writeSettings } from "@/lib/settings-store";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// GET /api/settings — current config (keys + models). Local app only.
+// GET /api/settings - current config (keys + models). Local app only.
 export async function GET() {
   try {
     return NextResponse.json(await readSettings());
@@ -13,7 +13,7 @@ export async function GET() {
   }
 }
 
-// POST /api/settings — save config.
+// POST /api/settings - save config.
 export async function POST(req: NextRequest) {
   let body: any;
   try {

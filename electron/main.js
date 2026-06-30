@@ -1,5 +1,5 @@
 // Electron main process. Boots the Next.js server inside the app and opens a
-// native window pointing at it — so the user just launches Fuse.app, no
+// native window pointing at it - so the user just launches Fuse.app, no
 // terminal required.
 const { app, BrowserWindow, shell, Menu, ipcMain, dialog } = require("electron");
 const path = require("path");
@@ -142,6 +142,70 @@ ipcMain.handle("fuse:choose-folder", async () => {
   return res.canceled || !res.filePaths.length ? null : res.filePaths[0];
 });
 
+// Open / reveal a plan file from the chat.
+ipcMain.handle("fuse:open-path", (_e, p) => shell.openPath(String(p || "")));
+ipcMain.handle("fuse:reveal-path", (_e, p) => {
+  if (p) shell.showItemInFolder(String(p));
+});
+
+// On-device speech-to-text via the bundled Swift helper.
+let voiceProc = null;
+function voiceBinPath() {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, "voice", "fuse-transcribe")
+    : path.join(__dirname, "voice", "fuse-transcribe");
+}
+ipcMain.handle("fuse:voice-start", (event) => {
+  if (voiceProc) {
+    try {
+      voiceProc.kill("SIGKILL");
+    } catch {}
+    voiceProc = null;
+  }
+  const bin = voiceBinPath();
+  if (!require("fs").existsSync(bin)) {
+    event.sender.send("fuse:voice-error", "Voice helper not found in this build.");
+    return false;
+  }
+  try {
+    voiceProc = spawn(bin, [], { stdio: ["ignore", "pipe", "pipe"] });
+  } catch (e) {
+    event.sender.send("fuse:voice-error", String(e));
+    return false;
+  }
+  let buf = "";
+  voiceProc.stdout.on("data", (d) => {
+    buf += d.toString();
+    let nl;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      try {
+        const obj = JSON.parse(line);
+        if (obj.text != null) event.sender.send("fuse:voice-text", obj.text);
+        else if (obj.error) event.sender.send("fuse:voice-error", obj.error);
+      } catch {}
+    }
+  });
+  voiceProc.on("close", () => {
+    voiceProc = null;
+  });
+  voiceProc.on("error", (e) => {
+    event.sender.send("fuse:voice-error", String(e));
+    voiceProc = null;
+  });
+  return true;
+});
+ipcMain.handle("fuse:voice-stop", () => {
+  if (voiceProc) {
+    try {
+      voiceProc.kill("SIGTERM");
+    } catch {}
+  }
+  return true;
+});
+
 app.whenReady().then(async () => {
   Menu.setApplicationMenu(Menu.buildFromTemplate(menuTemplate()));
   // Pick a stable port for the packaged app (dev keeps the fixed 3030).
@@ -173,6 +237,12 @@ app.on("before-quit", () => {
   if (serverProc) {
     serverProc.kill();
     serverProc = null;
+  }
+  if (voiceProc) {
+    try {
+      voiceProc.kill("SIGKILL");
+    } catch {}
+    voiceProc = null;
   }
 });
 
