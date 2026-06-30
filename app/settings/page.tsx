@@ -152,6 +152,19 @@ export default function SettingsPage() {
         </div>
       </Section>
 
+      <Section title="About" subtitle="Fuse is built and maintained by MigmaAI.">
+        <a
+          href="https://github.com/MigmaAI/fuse"
+          target="_blank"
+          rel="noreferrer noopener"
+          className="inline-flex items-center gap-2.5 rounded-2xl border border-border px-4 py-3 text-base transition hover:border-fg"
+        >
+          <GitHubIcon />
+          View on GitHub
+          <span className="text-sm text-muted">MigmaAI/fuse</span>
+        </a>
+      </Section>
+
       <div className="h-12" />
       {saved && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 rounded-full bg-fg px-5 py-2 text-base text-bg shadow-lg">
@@ -182,6 +195,14 @@ function Section({
       {subtitle && <p className="mb-4 -mt-2 text-base text-muted">{subtitle}</p>}
       {children}
     </section>
+  );
+}
+
+function GitHubIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M12 .5A11.5 11.5 0 0 0 .5 12a11.5 11.5 0 0 0 7.86 10.92c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.53-1.34-1.3-1.7-1.3-1.7-1.05-.72.08-.71.08-.71 1.17.08 1.79 1.2 1.79 1.2 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11 11 0 0 1 5.8 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.42-2.69 5.39-5.25 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 23.5 12 11.5 11.5 0 0 0 12 .5z" />
+    </svg>
   );
 }
 
