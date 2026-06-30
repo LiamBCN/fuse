@@ -13,6 +13,26 @@ usage locally with charts.
 - Provider adapters for Anthropic, OpenAI, xAI, Google, and OpenRouter.
 - Token usage **and full chat history** stored locally as JSON (see *Data* below).
 
+## Install with your coding agent (easiest)
+
+Already have **Claude Code** or **Codex CLI**? Paste this prompt into it and it
+will set Fuse up and launch it for you - no manual steps:
+
+```
+Install and launch the Fuse desktop app on my Mac from its public repo. Do this:
+
+1. Ensure git and Node.js 18+ are available. If Node is missing, install it with Homebrew: `brew install node`.
+2. Clone https://github.com/LiamBCN/fuse.git into ~/fuse and cd in (git pull if it already exists).
+3. Run `npm install`.
+4. Build the native app: `npm run pack`. This produces Fuse.app under dist/ (e.g. dist/mac-arm64/Fuse.app).
+5. Copy that Fuse.app into /Applications and open it with `open -a Fuse`. A native window should appear.
+6. If the native build fails for any reason, fall back to `npm run dev` and open http://localhost:3030 instead.
+
+Fuse routes answers through my local Claude and Codex CLIs, so once it's open, go to Settings to confirm the detected providers and pick proposer + aggregator models. Tell me when it's running.
+```
+
+Fuse detects your installed CLIs on first launch and walks you through the rest.
+
 ## Run as a Mac app (recommended)
 
 ```bash

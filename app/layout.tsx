@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import Nav from "@/components/Nav";
+import NativeGate from "@/components/NativeGate";
 import SetupGate from "@/components/SetupGate";
 
 export const metadata: Metadata = {
@@ -19,10 +20,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <script dangerouslySetInnerHTML={{ __html: themeInit }} />
       </head>
       <body className="flex h-screen flex-col bg-bg text-fg antialiased">
-        <SetupGate>
-          <Nav />
-          <main className="flex-1 overflow-hidden">{children}</main>
-        </SetupGate>
+        <NativeGate>
+          <SetupGate>
+            <Nav />
+            <main className="flex-1 overflow-hidden">{children}</main>
+          </SetupGate>
+        </NativeGate>
       </body>
     </html>
   );

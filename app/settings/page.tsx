@@ -152,16 +152,16 @@ export default function SettingsPage() {
         </div>
       </Section>
 
-      <Section title="About" subtitle="Fuse is built and maintained by MigmaAI.">
+      <Section title="About" subtitle="Fuse is open source.">
         <a
-          href="https://github.com/MigmaAI/fuse"
+          href="https://github.com/LiamBCN/fuse"
           target="_blank"
           rel="noreferrer noopener"
           className="inline-flex items-center gap-2.5 rounded-2xl border border-border px-4 py-3 text-base transition hover:border-fg"
         >
           <GitHubIcon />
           View on GitHub
-          <span className="text-sm text-muted">MigmaAI/fuse</span>
+          <span className="text-sm text-muted">LiamBCN/fuse</span>
         </a>
       </Section>
 
