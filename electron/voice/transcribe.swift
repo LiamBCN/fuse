@@ -23,7 +23,18 @@ var recognizer: SFSpeechRecognizer?
 var currentRequest: SFSpeechAudioBufferRecognitionRequest?
 var task: SFSpeechRecognitionTask?
 var finalized = ""   // text committed from earlier segments this session
+var lastPartial = "" // latest text of the segment in progress (not yet committed)
 var restarts = 0     // guard against runaway restart loops
+
+// Fold the in-progress segment into the committed transcript. A segment ends on
+// a pause via EITHER a final result OR an error, and in both cases the words
+// already heard must be kept - otherwise a pause silently drops everything
+// spoken before it, which looks like the input being wiped.
+func commitPartial() {
+    guard !lastPartial.isEmpty else { return }
+    finalized = finalized.isEmpty ? lastPartial : finalized + " " + lastPartial
+    lastPartial = ""
+}
 
 func beginSegment() {
     guard let recognizer = recognizer else { return }
@@ -35,18 +46,26 @@ func beginSegment() {
         req.requiresOnDeviceRecognition = true
     }
     currentRequest = req
+    lastPartial = ""
     task = recognizer.recognitionTask(with: req) { result, error in
+        // Ignore late callbacks from a segment we've already rolled past, so a
+        // stale task can't double-commit or clobber the current one.
+        guard currentRequest === req else { return }
         if let result = result {
             restarts = 0 // healthy output - reset the guard
-            let seg = result.bestTranscription.formattedString
-            let combined = finalized.isEmpty ? seg : finalized + " " + seg
+            lastPartial = result.bestTranscription.formattedString
+            let combined = finalized.isEmpty ? lastPartial : finalized + " " + lastPartial
             emit(["text": combined])
             if result.isFinal {
-                finalized = combined
-                beginSegment() // keep listening; earlier text preserved
+                currentRequest = nil
+                commitPartial()       // preserve this segment's words
+                beginSegment()        // keep listening
             }
         } else if error != nil {
-            // Segment ended (usually a pause/timeout). Continue listening.
+            // Segment ended (usually a pause/timeout). Commit what we heard so
+            // the phrase spoken before the pause survives, then keep listening.
+            currentRequest = nil
+            commitPartial()
             beginSegment()
         }
     }

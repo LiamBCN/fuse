@@ -1,7 +1,7 @@
 // Electron main process. Boots the Next.js server inside the app and opens a
 // native window pointing at it - so the user just launches Fuse.app, no
 // terminal required.
-const { app, BrowserWindow, shell, Menu, ipcMain, dialog } = require("electron");
+const { app, BrowserWindow, shell, Menu, ipcMain, dialog, systemPreferences } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const http = require("http");
@@ -155,7 +155,27 @@ function voiceBinPath() {
     ? path.join(process.resourcesPath, "voice", "fuse-transcribe")
     : path.join(__dirname, "voice", "fuse-transcribe");
 }
-ipcMain.handle("fuse:voice-start", (event) => {
+ipcMain.handle("fuse:voice-start", async (event) => {
+  // Acquire the microphone grant at the app level first. macOS persists this
+  // grant for Fuse.app across sessions; if the (separately-spawned, ad-hoc
+  // signed) Swift helper is the first to touch the mic, macOS attributes the
+  // request to that transient helper identity and re-prompts on every launch.
+  // Requesting here anchors the grant to the app bundle so it sticks.
+  if (process.platform === "darwin") {
+    try {
+      if (systemPreferences.getMediaAccessStatus("microphone") !== "granted") {
+        const granted = await systemPreferences.askForMediaAccess("microphone");
+        if (!granted) {
+          event.sender.send(
+            "fuse:voice-error",
+            "Microphone access is off. Turn it on in System Settings ▸ Privacy & Security ▸ Microphone, then try again.",
+          );
+          return false;
+        }
+      }
+    } catch {}
+  }
+
   if (voiceProc) {
     try {
       voiceProc.kill("SIGKILL");

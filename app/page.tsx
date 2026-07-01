@@ -595,15 +595,21 @@ export default function ChatPage() {
 
   return (
     <div className="mx-auto flex h-full max-w-4xl flex-col px-6">
-      {/* In a conversation: a Back button that returns to History (the chat list). */}
+      {/* In a conversation: Back-to-History and a quick "New chat" starter. */}
       {turns.length > 0 && (
-        <div className="pt-4">
+        <div className="flex items-center gap-2 pt-4">
           <Link
             href="/history"
             className="flex w-fit items-center gap-1.5 rounded-full border border-border px-3.5 py-1.5 text-sm text-muted transition hover:border-fg hover:text-fg"
           >
             <BackIcon /> History
           </Link>
+          <button
+            onClick={newChat}
+            className="flex w-fit items-center gap-1.5 rounded-full border border-border px-3.5 py-1.5 text-sm text-muted transition hover:border-fg hover:text-fg"
+          >
+            <PlusIcon /> New chat
+          </button>
         </div>
       )}
 
@@ -1221,6 +1227,14 @@ function Message({
           >
             Debug ↗
           </Link>
+          {turn.usage && turn.usage.total_tokens > 0 && (
+            <span
+              className="ml-auto text-muted"
+              title={`${turn.usage.prompt_tokens.toLocaleString()} in · ${turn.usage.completion_tokens.toLocaleString()} out — across all agents + the fuse`}
+            >
+              {turn.usage.total_tokens.toLocaleString()} tokens
+            </span>
+          )}
         </div>
         {open && turn.proposals && (
           <div className="mt-4 space-y-3">

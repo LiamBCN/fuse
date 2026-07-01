@@ -210,13 +210,17 @@ async function runClaude(
     args.push("--max-turns", "60", "--permission-mode", "bypassPermissions");
   } else {
     // No folder: a pure text answer - plan synthesis (review/harden/finalize) or
-    // plain chat. Force `default` permission mode so the model can't auto-run
-    // tools. Otherwise, when the user's global config defaults to
-    // bypassPermissions, the aggregator wanders off running Bash/Read/grep to
-    // "verify the codebase" the plan mentions, burns the turn budget, and fails
-    // with error_max_turns instead of producing the plan. With no tools it just
-    // writes the answer in a single turn.
-    args.push("--max-turns", "8", "--permission-mode", "default");
+    // plain chat. Disable tools outright with `--tools ""` so the model can't run
+    // anything and just writes the answer in a single turn.
+    //
+    // `--permission-mode default` alone was NOT enough: default mode still lets
+    // the read-only tools (Read/Glob/Grep) run without a prompt, so the
+    // aggregator would wander off "verifying the codebase" the plan mentions,
+    // exhaust the turn budget, and fail with `error_max_turns` - the "Reached
+    // maximum number of turns" error users kept hitting on review/synthesis
+    // steps. With no tools available there's nothing to loop on. The generous
+    // --max-turns is just a backstop; a tool-less answer completes in one turn.
+    args.push("--tools", "", "--permission-mode", "default", "--max-turns", "40");
   }
 
   // Live progress: count assistant text as it streams in. JSON objects are

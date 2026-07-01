@@ -9,7 +9,7 @@
 // mounted when it arrives.
 import { saveConversation } from "./conversations";
 import { notifyUser, playChime } from "./notify";
-import type { Proposal, Turn } from "./types";
+import type { Proposal, Turn, Usage } from "./types";
 
 export interface RunProgress {
   done: number;
@@ -38,6 +38,7 @@ interface StartOpts {
 type ResultEvent = {
   final: string;
   proposals?: Proposal[];
+  usage?: Usage;
   needsClarification?: boolean;
   questions?: string[];
   files?: string[];
@@ -140,6 +141,7 @@ async function drive(convId: string, opts: StartOpts): Promise<void> {
       content: result.final,
       proposals: result.proposals,
       planFiles: result.files,
+      usage: result.usage,
     };
     await saveConversation({ id: convId, turns: [...opts.turns, assistant] });
 

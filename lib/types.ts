@@ -94,4 +94,5 @@ export interface Turn {
   files?: string[]; // attached text-file names (shown as chips)
   fileText?: string; // inlined file contents - sent to models, not displayed/stored
   planFiles?: string[]; // absolute paths of plan files produced (plan mode)
+  usage?: Usage; // total tokens spent producing this assistant reply (all agents + aggregator)
 }
