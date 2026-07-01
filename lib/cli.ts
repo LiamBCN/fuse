@@ -65,6 +65,13 @@ const childEnv = () => ({
   ...process.env,
   HOME,
   PATH: [...EXTRA_DIRS, process.env.PATH || ""].join(":"),
+  // Isolate the spawned CLI from the user's global Claude config so their
+  // plugins/hooks/skills (superpowers, output styles, SessionStart hooks, etc.)
+  // don't load into Fuse's proposer/aggregator runs. Those hooks push the model
+  // toward tool use and skill invocation, which wastes the turn budget on a
+  // step that should just emit text. A dedicated empty config dir keeps runs
+  // deterministic.
+  CLAUDE_CONFIG_DIR: path.join(WORKDIR, "claude-config"),
 });
 
 // Flatten the conversation into a single prompt (+ optional system text). The
@@ -210,13 +217,20 @@ async function runClaude(
     args.push("--max-turns", "60", "--permission-mode", "bypassPermissions");
   } else {
     // No folder: a pure text answer - plan synthesis (review/harden/finalize) or
-    // plain chat. Force `default` permission mode so the model can't auto-run
-    // tools. Otherwise, when the user's global config defaults to
-    // bypassPermissions, the aggregator wanders off running Bash/Read/grep to
-    // "verify the codebase" the plan mentions, burns the turn budget, and fails
-    // with error_max_turns instead of producing the plan. With no tools it just
-    // writes the answer in a single turn.
-    args.push("--max-turns", "8", "--permission-mode", "default");
+    // plain chat. The model must NOT touch tools here. `--permission-mode
+    // default` alone does not remove tools; it only prompts for them, and in
+    // headless `-p` mode every prompt auto-denies. The model then retries the
+    // denied Bash/Read/grep calls (e.g. to "verify the codebase" the plan
+    // mentions) until it exhausts --max-turns and fails with error_max_turns
+    // instead of producing the plan. Explicitly empty the toolset so the tools
+    // are gone, not merely gated, and the answer comes back in a single turn.
+    args.push(
+      "--max-turns", "8",
+      "--permission-mode", "default",
+      "--disallowedTools",
+      "Bash", "Read", "Edit", "Write", "Glob", "Grep",
+      "Task", "WebFetch", "WebSearch", "NotebookEdit",
+    );
   }
 
   // Live progress: count assistant text as it streams in. JSON objects are
