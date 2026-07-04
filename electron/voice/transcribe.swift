@@ -66,6 +66,7 @@ func beginSegment() {
             // the phrase spoken before the pause survives, then keep listening.
             currentRequest = nil
             commitPartial()
+            emit(["text": finalized])
             beginSegment()
         }
     }

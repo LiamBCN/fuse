@@ -11,6 +11,7 @@ import type { CliStatus } from "@/lib/cli";
 import { formatLimitDeltas } from "@/lib/limit-format";
 import { PROVIDERS } from "@/lib/models";
 import { loadConfig, saveConfig, type FuseConfig } from "@/lib/settings";
+import { mergeVoiceTranscript } from "@/lib/voice-transcript";
 import {
   inferMode,
   loadConversationDraft,
@@ -119,6 +120,7 @@ export default function ChatPage() {
   const ctxRef = useRef<HTMLDivElement>(null);
   const recRef = useRef<any>(null);
   const voiceCleanupRef = useRef<null | (() => void)>(null);
+  const voiceMaxTextRef = useRef("");
 
   // Generation lives in the app-level runtime (lib/chat-runtime), so it keeps
   // going when you leave this page and multiple chats can run at once. Subscribe
@@ -430,6 +432,7 @@ export default function ChatPage() {
   function stopMic() {
     const api = typeof window !== "undefined" ? (window as any).fuse : null;
     api?.voiceStop?.();
+    voiceMaxTextRef.current = "";
     recRef.current?.stop?.();
     voiceCleanupRef.current?.();
     voiceCleanupRef.current = null;
@@ -446,6 +449,7 @@ export default function ChatPage() {
     const api = typeof window !== "undefined" ? (window as any).fuse : null;
     if (api?.voiceStart) {
       voiceCleanupRef.current?.(); // drop any lingering listener so it can't clobber text
+      voiceMaxTextRef.current = "";
       const base = input ? input.trimEnd() + " " : "";
       let offText: undefined | (() => void);
       let offErr: undefined | (() => void);
@@ -453,11 +457,18 @@ export default function ChatPage() {
         offText?.();
         offErr?.();
       };
-      offText = api.onVoiceText?.((t: string) => setInput((base + t).replace(/\s+/g, " ")));
+      offText = api.onVoiceText?.((t: string) => {
+        const merged = mergeVoiceTranscript(base, t, voiceMaxTextRef.current);
+        if (merged.length > voiceMaxTextRef.current.length) {
+          voiceMaxTextRef.current = merged;
+          setInput(merged);
+        }
+      });
       offErr = api.onVoiceError?.((e: string) => {
         setErrorInfo(null);
         setError(e || "Voice input failed.");
         setRecording(false);
+        voiceMaxTextRef.current = "";
         cleanup();
         voiceCleanupRef.current = null;
       });
@@ -481,25 +492,35 @@ export default function ChatPage() {
       rec.interimResults = true;
       rec.continuous = true;
       const base = input ? input.trimEnd() + " " : "";
+      voiceMaxTextRef.current = "";
       rec.onresult = (e: any) => {
         let txt = "";
         for (let i = 0; i < e.results.length; i++) txt += e.results[i][0].transcript;
-        setInput((base + txt).replace(/\s+/g, " "));
+        const merged = mergeVoiceTranscript(base, txt, voiceMaxTextRef.current);
+        if (merged.length > voiceMaxTextRef.current.length) {
+          voiceMaxTextRef.current = merged;
+          setInput(merged);
+        }
       };
       rec.onerror = (e: any) => {
         setRecording(false);
+        voiceMaxTextRef.current = "";
         if (e?.error === "not-allowed") setError("Microphone permission was denied.");
         else if (e?.error === "network" || e?.error === "service-not-allowed")
           setError("Voice transcription isn't available in the app - use macOS Dictation (your Dictation key) to speak into the box.");
         setErrorInfo(null);
       };
-      rec.onend = () => setRecording(false);
+      rec.onend = () => {
+        setRecording(false);
+        voiceMaxTextRef.current = "";
+      };
       recRef.current = rec;
       setError(null);
       setRecording(true);
       rec.start();
     } catch {
       setRecording(false);
+      voiceMaxTextRef.current = "";
       setError("Couldn't start voice input.");
       setErrorInfo(null);
     }
@@ -1056,25 +1077,14 @@ export default function ChatPage() {
               <MicIcon />
             </button>
             {busy ? (
-              canLive ? (
-                <button
-                  onClick={liveOpen ? () => setLiveOpen(false) : expandLiveRun}
-                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-fg text-bg transition hover:opacity-80"
-                  aria-label={liveOpen ? "Minimize generation process" : "Expand generation process"}
-                  title={liveOpen ? "Minimize" : "Expand"}
-                >
-                  {liveOpen ? <CollapseIcon /> : <ExpandIcon />}
-                </button>
-              ) : (
-                <button
-                  onClick={() => stopRun(convId.current)}
-                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-fg text-bg transition hover:opacity-80"
-                  aria-label="Stop"
-                  title="Stop"
-                >
-                  <StopIcon />
-                </button>
-              )
+              <button
+                onClick={() => stopRun(convId.current)}
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-fg text-bg transition hover:opacity-80"
+                aria-label="Stop"
+                title="Stop"
+              >
+                <StopIcon />
+              </button>
             ) : (
               <button
                 onClick={() => send()}
@@ -1565,24 +1575,6 @@ function MicIcon() {
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <rect x="9" y="3" width="6" height="11" rx="3" />
       <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
-    </svg>
-  );
-}
-
-function ExpandIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M8 3H3v5M16 3h5v5M21 16v5h-5M3 16v5h5" />
-      <path d="M3 3l6 6M21 3l-6 6M21 21l-6-6M3 21l6-6" />
-    </svg>
-  );
-}
-
-function CollapseIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M9 3v6H3M15 3v6h6M15 21v-6h6M9 21v-6H3" />
-      <path d="M9 9 3 3M15 9l6-6M15 15l6 6M9 15l-6 6" />
     </svg>
   );
 }
