@@ -6,6 +6,9 @@ interface CliStatus {
   ok: boolean;
   path: string | null;
   version?: string;
+  loggedIn?: boolean;
+  tokenConfigured?: boolean;
+  authError?: string;
   error?: string;
 }
 interface SetupData {
@@ -59,7 +62,7 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
     }
   };
 
-  const claudeOk = !!data?.claude.ok;
+  const claudeOk = !!data?.claude.ok && data?.claude.loggedIn !== false;
   const ready = claudeOk; // hard requirement: the aggregator runs through the Claude CLI
 
   const finish = () => {
@@ -109,7 +112,7 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
           checking={checking}
           status={data?.claude}
           okText={data?.claude.version}
-          hint="Install Claude Code, then run `claude` once in a terminal to sign in. Custom path? Set FUSE_CLAUDE_BIN to it and re-check."
+          hint="Install Claude Code, run `claude setup-token` in a logged-in terminal, then paste the token in Settings. Custom path? Set FUSE_CLAUDE_BIN to it and re-check."
         />
 
         {/* Recommended */}
@@ -149,7 +152,7 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
           <div className="mt-6 rounded-2xl border border-red-500/40 bg-red-500/5 p-4 text-sm">
             <span className="font-semibold text-red-500">Not ready yet.</span>{" "}
             <span className="text-muted">
-              The Claude CLI is required to use Fuse. Install &amp; sign in, then re-check.
+              The Claude CLI is required to use Fuse. Install it, configure a setup token, then re-check.
             </span>
           </div>
         )}
@@ -216,7 +219,7 @@ function CheckRow({
 }) {
   const state: "ok" | "fail" | "checking" | "warn" = checking
     ? "checking"
-    : status?.ok
+    : status?.ok && status.loggedIn !== false
       ? "ok"
       : optional
         ? "warn"
@@ -230,7 +233,9 @@ function CheckRow({
           <div className="truncate text-sm text-muted">
             {checking
               ? "Checking…"
-              : status?.ok
+              : status?.ok && status.loggedIn === false
+                ? status.authError || "Found, but Claude is not authenticated for headless use."
+                : status?.ok
                 ? okText || status.path || "Found"
                 : status?.path
                   ? `Found but won't run: ${status.error || "error"}`

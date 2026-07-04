@@ -1,5 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
+import { LimitMeter, useLimits } from "@/components/LimitMeter";
+import { formatPercent } from "@/lib/limit-format";
 import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell,
 } from "recharts";
@@ -8,6 +10,19 @@ interface UsageData {
   totals: { tokens: number; input: number; output: number; calls: number; conversations: number };
   daily: { day: string; tokens: number }[];
   models: { model: string; input: number; output: number; tokens: number; calls: number }[];
+  conversations: {
+    conversationId: string;
+    input: number;
+    output: number;
+    tokens: number;
+    calls: number;
+    claudeSession: number;
+    claudeWeekly: number;
+    codexSession: number;
+    codexWeekly: number;
+    approx: boolean;
+    lastTs: number;
+  }[];
 }
 
 // Monochrome bars: same fill (CSS var) with descending opacity for separation.
@@ -24,6 +39,7 @@ const tooltipStyle = {
 export default function StatsPage() {
   const [data, setData] = useState<UsageData | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const { limits } = useLimits(false);
 
   useEffect(() => {
     fetch("/api/usage").then((r) => r.json()).then(setData).catch((e) => setErr(String(e)));
@@ -53,6 +69,10 @@ export default function StatsPage() {
             <Stat label="Model calls" value={data.totals.calls.toLocaleString()} />
             <Stat label="Conversations" value={data.totals.conversations.toLocaleString()} />
           </div>
+
+          <Card title="Current limits">
+            <LimitMeter limits={limits} />
+          </Card>
 
           <Card title="Tokens per day">
             <ResponsiveContainer width="100%" height={280}>
@@ -105,6 +125,44 @@ export default function StatsPage() {
                 ))}
               </tbody>
             </table>
+          </Card>
+
+          <Card title="Conversations">
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[760px] text-left text-base">
+                <thead className="text-sm uppercase tracking-wide text-muted">
+                  <tr>
+                    <th className="py-3">Conversation</th>
+                    <th className="py-3 text-right">Calls</th>
+                    <th className="py-3 text-right">Input</th>
+                    <th className="py-3 text-right">Output</th>
+                    <th className="py-3 text-right">Total</th>
+                    <th className="py-3 text-right">Claude 5h</th>
+                    <th className="py-3 text-right">Codex 5h</th>
+                    <th className="py-3 text-right">Weekly</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.conversations.map((c) => (
+                    <tr key={c.conversationId} className="border-t border-border">
+                      <td className="max-w-[16rem] truncate py-3" title={c.conversationId}>
+                        {c.conversationId}
+                        {c.approx && <span className="ml-1 text-muted">≈</span>}
+                      </td>
+                      <td className="py-3 text-right text-muted">{c.calls}</td>
+                      <td className="py-3 text-right text-muted">{c.input.toLocaleString()}</td>
+                      <td className="py-3 text-right text-muted">{c.output.toLocaleString()}</td>
+                      <td className="py-3 text-right">{c.tokens.toLocaleString()}</td>
+                      <td className="py-3 text-right text-muted">≈{formatPercent(c.claudeSession)}</td>
+                      <td className="py-3 text-right text-muted">≈{formatPercent(c.codexSession)}</td>
+                      <td className="py-3 text-right text-muted">
+                        ≈{formatPercent(c.claudeWeekly + c.codexWeekly)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </Card>
         </>
       )}

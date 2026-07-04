@@ -9,7 +9,7 @@
 // mounted when it arrives.
 import { saveConversation } from "./conversations";
 import { notifyUser, playChime } from "./notify";
-import type { Proposal, Turn, Usage } from "./types";
+import type { ErrorInfo, Mode, Proposal, StageInfo, Turn, Usage, UsageLimitDeltas } from "./types";
 
 export interface RunProgress {
   done: number;
@@ -23,28 +23,35 @@ export type RunStatus = "running" | "done" | "error";
 export interface RunRecord {
   convId: string;
   status: RunStatus;
+  mode?: Mode;
+  stages?: StageInfo[];
   progress: RunProgress | null;
   startedAt: number;
   error?: string;
+  errorInfo?: ErrorInfo;
   clarify?: { questions: string[] };
 }
 
 interface StartOpts {
   turns: Turn[]; // full history INCLUDING the just-added user turn
   body: unknown; // request body for POST /api/chat
+  mode?: Mode;
   notifications?: boolean;
 }
 
 type ResultEvent = {
+  mode?: Mode;
   final: string;
   proposals?: Proposal[];
   usage?: Usage;
+  limits?: UsageLimitDeltas;
   needsClarification?: boolean;
   questions?: string[];
   files?: string[];
 };
 
 const runs = new Map<string, RunRecord>();
+const fetchControllers = new Map<string, AbortController>();
 const listeners = new Set<() => void>();
 let version = 0;
 
@@ -52,6 +59,28 @@ const emit = () => {
   version++;
   listeners.forEach((l) => l());
 };
+
+function notifyLimitsChanged() {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent("fuse:limits-refresh"));
+}
+
+function mergeStages(existing: StageInfo[] | undefined, incoming: StageInfo[]): StageInfo[] {
+  const prevByKey = new Map((existing ?? []).map((s) => [s.key, s]));
+  const seen = new Set<string>();
+  const merged = incoming.map((next) => {
+    const prev = prevByKey.get(next.key);
+    seen.add(next.key);
+    if (!prev) return next;
+    const out = { ...prev, ...next };
+    if (next.output === undefined && prev.output !== undefined) out.output = prev.output;
+    return out;
+  });
+  for (const old of existing ?? []) {
+    if (!seen.has(old.key)) merged.push(old);
+  }
+  return merged;
+}
 
 // --- store interface for useSyncExternalStore -------------------------------
 export function subscribeRuns(fn: () => void): () => void {
@@ -82,12 +111,26 @@ export function clearRun(convId: string): void {
 export function startRun(convId: string, opts: StartOpts): void {
   // One generation per conversation at a time (concurrency is across convs).
   if (runs.get(convId)?.status === "running") return;
-  runs.set(convId, { convId, status: "running", progress: null, startedAt: Date.now() });
+  const controller = new AbortController();
+  fetchControllers.set(convId, controller);
+  runs.set(convId, { convId, status: "running", mode: opts.mode, progress: null, startedAt: Date.now() });
   emit();
-  void drive(convId, opts);
+  void drive(convId, opts, controller);
 }
 
-async function drive(convId: string, opts: StartOpts): Promise<void> {
+export function stopRun(convId: string): void {
+  if (runs.get(convId)?.status !== "running") return;
+  clearRun(convId);
+  fetchControllers.get(convId)?.abort();
+  void fetch("/api/chat/stop", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ conversationId: convId }),
+    keepalive: true,
+  }).catch(() => {});
+}
+
+async function drive(convId: string, opts: StartOpts, controller: AbortController): Promise<void> {
   const patch = (p: Partial<RunRecord>) => {
     const cur = runs.get(convId);
     if (!cur) return;
@@ -100,6 +143,7 @@ async function drive(convId: string, opts: StartOpts): Promise<void> {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(opts.body),
+      signal: controller.signal,
     });
     if (!res.ok || !res.body) {
       let msg = "Request failed";
@@ -126,10 +170,14 @@ async function drive(convId: string, opts: StartOpts): Promise<void> {
         const ev = JSON.parse(raw.slice(5).trim());
         if (ev.type === "progress") {
           patch({ progress: { done: ev.done, total: ev.total, label: ev.label, agents: ev.agents } });
+        } else if (ev.type === "stage") {
+          const cur = runs.get(convId);
+          patch({ stages: mergeStages(cur?.stages, Array.isArray(ev.stages) ? ev.stages : []) });
         } else if (ev.type === "result") {
           result = ev;
         } else if (ev.type === "error") {
-          throw new Error(ev.error);
+          const err = Object.assign(new Error(ev.error), { info: ev.info as ErrorInfo | undefined });
+          throw err;
         }
       }
     }
@@ -139,14 +187,17 @@ async function drive(convId: string, opts: StartOpts): Promise<void> {
     const assistant: Turn = {
       role: "assistant",
       content: result.final,
+      mode: result.mode ?? opts.mode,
       proposals: result.proposals,
       planFiles: result.files,
       usage: result.usage,
+      limits: result.limits,
     };
     await saveConversation({ id: convId, turns: [...opts.turns, assistant] });
 
     patch({
       status: "done",
+      mode: result.mode ?? opts.mode,
       progress: null,
       clarify: result.needsClarification ? { questions: result.questions ?? [] } : undefined,
     });
@@ -159,7 +210,12 @@ async function drive(convId: string, opts: StartOpts): Promise<void> {
     } else if (opts.notifications && typeof document !== "undefined" && !document.hasFocus()) {
       notifyUser("Fuse finished", "Your response is ready.");
     }
+    notifyLimitsChanged();
   } catch (e: any) {
-    patch({ status: "error", progress: null, error: e?.message ?? String(e) });
+    if (e?.name === "AbortError") return;
+    patch({ status: "error", progress: null, error: e?.message ?? String(e), errorInfo: e?.info });
+    notifyLimitsChanged();
+  } finally {
+    if (fetchControllers.get(convId) === controller) fetchControllers.delete(convId);
   }
 }

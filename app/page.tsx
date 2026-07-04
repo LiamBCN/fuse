@@ -1,20 +1,31 @@
 "use client";
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
+import ErrorBanner from "@/components/ErrorBanner";
+import { ComposerLimitWarning } from "@/components/LimitMeter";
+import LiveRunView from "@/components/LiveRunView";
 import Markdown from "@/components/Markdown";
 import Logo from "@/components/Logo";
+import ModeBadge from "@/components/ModeBadge";
+import type { CliStatus } from "@/lib/cli";
+import { formatLimitDeltas } from "@/lib/limit-format";
 import { PROVIDERS } from "@/lib/models";
 import { loadConfig, saveConfig, type FuseConfig } from "@/lib/settings";
 import {
+  inferMode,
+  loadConversationDraft,
   loadConversation,
   saveConversation,
   loadActiveId,
   saveActiveId,
+  saveConversationDraft,
 } from "@/lib/conversations";
-import { clearRun, getRun, runsVersion, startRun, subscribeRuns } from "@/lib/chat-runtime";
-import type { ImagePart, Mode, ModelRef, Turn } from "@/lib/types";
+import { clearRun, getRun, runsVersion, startRun, stopRun, subscribeRuns } from "@/lib/chat-runtime";
+import type { ErrorInfo, ImagePart, LimitProvider, Mode, ModelRef, Turn } from "@/lib/types";
 
 const mkey = (m: ModelRef) => `${m.provider}::${m.model}`;
+const limitProviderFor = (provider: string): LimitProvider | null =>
+  provider === "claude-cli" ? "claude" : provider === "codex-cli" ? "codex" : null;
 
 // Shared style for every control above the composer (agent pills, selects,
 // New chat) so they all match: small, rounded, bordered.
@@ -27,28 +38,33 @@ const fmtElapsed = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padSta
 const fmtK = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : `${n}`);
 const CONTEXT_TOKENS = 200_000; // Claude context window (approx)
 
-// How the agents work. Normal = a fused answer; Attack/Relay run a planning
-// pipeline and save a plan.md (hover shows the diagram).
-const MODE_OPTIONS: { value: Mode; label: string; blurb: string; img?: string }[] = [
+type ModeOptionValue = "fast" | "relay" | "recon";
+
+// How the agents work. The mode chooses the folder-backed planning pipeline;
+// in Chat without a folder, every mode just answers normally.
+const MODE_OPTIONS: { value: ModeOptionValue; label: string; blurb: string }[] = [
   {
-    value: "normal",
+    value: "fast",
     label: "Normal",
-    blurb: "Each agent answers and the strongest model fuses them into one reply. No plan file.",
-    img: "/plan-normal.png",
-  },
-  {
-    value: "attack",
-    label: "Attack",
-    blurb: "Both agents draft a plan, then each attacks the other's to expose risks. The strongest model merges them into one plan.md.",
-    img: "/plan-attack.png",
+    blurb: "Speed: two agents draft plans from your real code in parallel, then the strongest model fact-checks the load-bearing claims against the source and finalizes. In Chat without a folder, every mode just answers normally.",
   },
   {
     value: "relay",
     label: "Relay",
-    blurb: "One agent drafts, the other hardens it, then the strongest model finalizes - a deeper hand-off. Saves plan.md.",
-    img: "/plan-relay.png",
+    blurb: "The classic hand-off, compressed: two agents draft from your real code, then one blind harden-and-finalize pass merges the stronger coverage without re-opening files. Lighter checking than Normal/Recon - fastest deep-reasoning pipeline.",
+  },
+  {
+    value: "recon",
+    label: "Recon",
+    blurb: "Power: clarify, recon, and two grounded drafts start together; one finalizer resumes the recon session when available, fact-checks both drafts, and writes the verified plan. Maximum-confidence planning with much less waiting.",
   },
 ];
+
+const modeOptionValue = (mode?: string | null): ModeOptionValue => {
+  if (mode === "relay") return "relay";
+  if (mode === "recon" || mode === "deep" || mode === "attack" || mode === "relay2") return "recon";
+  return "fast";
+};
 
 const newConvId = () => "conv-" + Math.floor(Math.random() * 1e9);
 
@@ -80,16 +96,19 @@ export default function ChatPage() {
   const [elapsed, setElapsed] = useState(0);
   const [atBottom, setAtBottom] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [errorInfo, setErrorInfo] = useState<ErrorInfo | null>(null);
   const [openProposals, setOpenProposals] = useState<number | null>(null);
   const [activeKeys, setActiveKeys] = useState<Set<string>>(new Set());
   const [agentsOpen, setAgentsOpen] = useState(false);
   const [planOpen, setPlanOpen] = useState(false);
-  const [planHover, setPlanHover] = useState<Mode | null>(null);
+  const [liveOpen, setLiveOpen] = useState(false);
   const [folderMenuOpen, setFolderMenuOpen] = useState(false);
   const [ctxOpen, setCtxOpen] = useState(false);
   const [recording, setRecording] = useState(false);
   const [clarify, setClarify] = useState<{ questions: string[] } | null>(null);
   const [clarifyAnswer, setClarifyAnswer] = useState("");
+  const [cliStatus, setCliStatus] = useState<{ claude: CliStatus; codex: CliStatus } | null>(null);
+  const [cliChecking, setCliChecking] = useState(false);
   const convId = useRef<string>(newConvId());
   const scrollRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -109,6 +128,16 @@ export default function ChatPage() {
   const activeRun = getRun(convId.current);
   const busy = activeRun?.status === "running";
   const progress = activeRun?.progress ?? null;
+  const canLive = !!activeRun?.stages?.length;
+  const runMode = (activeRun?.mode ?? cfg?.mode ?? "fast") as Mode;
+
+  const expandLiveRun = useCallback(() => {
+    if (!canLive) return;
+    setLiveOpen(true);
+    requestAnimationFrame(() => {
+      scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+    });
+  }, [canLive]);
 
   // Apply a finished run for `id` (its assistant turn is already persisted by the
   // runtime): refresh the transcript and surface a clarification / error, then
@@ -118,6 +147,7 @@ export default function ChatPage() {
     if (!run || run.status === "running") return;
     if (run.status === "error") {
       setError(run.error ?? "Request failed");
+      setErrorInfo(run.errorInfo ?? null);
       clearRun(id);
       return;
     }
@@ -131,11 +161,30 @@ export default function ChatPage() {
     clearRun(id);
   };
 
+  // Same readiness probe as the first-run Onboarding screen, re-run whenever a
+  // conversation starts so a lapsed CLI (expired auth, uninstalled binary, etc.)
+  // surfaces here instead of only failing deep into a run.
+  const checkCliConnection = useCallback(async () => {
+    setCliChecking(true);
+    try {
+      const r = await fetch("/api/setup", { cache: "no-store" });
+      setCliStatus(await r.json());
+    } catch {
+      setCliStatus({
+        claude: { ok: false, path: null, error: "Could not reach the Fuse server." },
+        codex: { ok: false, path: null },
+      });
+    } finally {
+      setCliChecking(false);
+    }
+  }, []);
+
   useEffect(() => {
     loadConfig().then((c) => {
       setCfg(c);
       setActiveKeys(new Set(c.proposers.map(mkey))); // all configured agents on by default
     });
+    checkCliConnection();
 
     // Stay on the same conversation across refreshes. Restore the last active
     // one if it still exists; otherwise start a fresh one and remember it.
@@ -145,14 +194,22 @@ export default function ChatPage() {
         if (restored) {
           convId.current = restored.id;
           setTurns(restored.turns);
+          setInput(loadConversationDraft(restored.id));
           // It may have finished (or errored) while this page was unmounted.
           reconcileRun(restored.id);
         } else {
-          saveActiveId(convId.current);
+          // No server record yet - it's a brand-new or draft-only chat that was
+          // never sent (conversations persist only once they have turns). Keep
+          // the active id so its unsent prompt survives navigation, instead of
+          // spinning up a fresh empty chat and orphaning the saved draft.
+          convId.current = active;
+          saveActiveId(active);
+          setInput(loadConversationDraft(active));
         }
       });
     } else {
       saveActiveId(convId.current);
+      setInput(loadConversationDraft(convId.current));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -164,6 +221,12 @@ export default function ChatPage() {
     saveConversation({ id: convId.current, turns });
   }, [turns]);
 
+  // Keep the unsent composer text per conversation so navigating away and back
+  // never loses the prompt currently being written.
+  useEffect(() => {
+    saveConversationDraft(convId.current, input);
+  }, [input]);
+
   // React to the active conversation's run finishing (including while we were on
   // another page) - pull the persisted reply, or show its clarify/error.
   useEffect(() => {
@@ -172,8 +235,9 @@ export default function ChatPage() {
   }, [runsTick]);
 
   useEffect(() => {
+    if (liveOpen) return;
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [turns, busy, progress]);
+  }, [turns, busy, progress, liveOpen]);
   // Count seconds while a response is generating, so the user sees it's alive -
   // measured from when the run actually started (survives navigating away/back).
   useEffect(() => {
@@ -234,6 +298,11 @@ export default function ChatPage() {
 
   const hasAttachments = pendImages.length > 0 || pendFiles.length > 0;
 
+  // Same "ready" definition Onboarding uses: the aggregator runs through the
+  // Claude CLI, so it's a hard requirement. Undetermined (still checking / not
+  // yet run) reads as ok so the banner doesn't flash before the first check lands.
+  const cliDisconnected = !!cliStatus && !(cliStatus.claude.ok && cliStatus.claude.loggedIn !== false);
+
   // Rough estimate of how much of the model's context window this conversation uses.
   const usedTokens = useMemo(() => {
     let chars = input.length + pendFiles.reduce((s, f) => s + f.text.length, 0);
@@ -247,6 +316,13 @@ export default function ChatPage() {
     () => (cfg ? cfg.proposers.filter((p) => activeKeys.has(mkey(p))) : []),
     [cfg, activeKeys],
   );
+
+  const activeLimitProviders = useMemo<LimitProvider[]>(() => {
+    if (!cfg) return [];
+    const refs: ModelRef[] = [...activeProposers, cfg.aggregator];
+    if (cfg.folderMode) refs.push(...(Object.values(cfg.stageModels ?? {}) as ModelRef[]));
+    return refs.map((ref) => limitProviderFor(ref.provider)).filter((provider): provider is LimitProvider => !!provider);
+  }, [cfg, activeProposers]);
 
   // Candidate models for the "fuse with" picker: everything configured plus
   // each provider's defaults, de-duplicated.
@@ -278,9 +354,9 @@ export default function ChatPage() {
     saveConfig(next); // remember the chosen fuser across sessions
   }
 
-  function setMode(mode: Mode) {
+  function setMode(mode: ModeOptionValue) {
     if (!cfg) return;
-    const next = { ...cfg, mode };
+    const next = { ...cfg, mode: mode as FuseConfig["mode"] };
     setCfg(next);
     saveConfig(next);
   }
@@ -299,13 +375,11 @@ export default function ChatPage() {
     patchCfg({ folderMode: on && !!cfg.workdir });
   }
 
-  // Activate a folder and move it to the top of the recents list. Folders are
-  // for planning, so switch out of Normal into a plan pipeline (Attack).
+  // Activate a folder and move it to the top of the recents list.
   function selectFolder(dir: string) {
     if (!cfg) return;
     const recentFolders = [dir, ...cfg.recentFolders.filter((x) => x !== dir)].slice(0, 12);
-    const mode: Mode = cfg.mode === "normal" ? "attack" : cfg.mode;
-    patchCfg({ workdir: dir, folderMode: true, mode, recentFolders });
+    patchCfg({ workdir: dir, folderMode: true, recentFolders });
     setFolderMenuOpen(false);
   }
   function removeRecent(dir: string) {
@@ -335,9 +409,11 @@ export default function ChatPage() {
           const text = await readAs(file, "text");
           setPendFiles((p) => [...p, { name: file.name, text }]);
         } else {
+          setErrorInfo(null);
           setError(`Unsupported file type: ${file.name}`);
         }
       } catch {
+        setErrorInfo(null);
         setError(`Could not read ${file.name}`);
       }
     }
@@ -379,6 +455,7 @@ export default function ChatPage() {
       };
       offText = api.onVoiceText?.((t: string) => setInput((base + t).replace(/\s+/g, " ")));
       offErr = api.onVoiceError?.((e: string) => {
+        setErrorInfo(null);
         setError(e || "Voice input failed.");
         setRecording(false);
         cleanup();
@@ -394,6 +471,7 @@ export default function ChatPage() {
     const SR = (typeof window !== "undefined" && ((window as any).webkitSpeechRecognition || (window as any).SpeechRecognition)) as any;
     if (!SR) {
       setError("Voice input isn't available here. Use macOS Dictation (press your Dictation key, e.g. Fn Fn) to speak into the box.");
+      setErrorInfo(null);
       taRef.current?.focus();
       return;
     }
@@ -413,6 +491,7 @@ export default function ChatPage() {
         if (e?.error === "not-allowed") setError("Microphone permission was denied.");
         else if (e?.error === "network" || e?.error === "service-not-allowed")
           setError("Voice transcription isn't available in the app - use macOS Dictation (your Dictation key) to speak into the box.");
+        setErrorInfo(null);
       };
       rec.onend = () => setRecording(false);
       recRef.current = rec;
@@ -422,6 +501,7 @@ export default function ChatPage() {
     } catch {
       setRecording(false);
       setError("Couldn't start voice input.");
+      setErrorInfo(null);
     }
   }
 
@@ -430,10 +510,12 @@ export default function ChatPage() {
     if ((!text && !hasAttachments) || busy || !cfg) return;
     if (recording) stopMic();
     if (activeProposers.length === 0) {
+      setErrorInfo(null);
       setError("Select at least one agent to ask.");
       return;
     }
     setError(null);
+    setErrorInfo(null);
 
     const useAttach = textOverride === undefined;
     const fileText = useAttach ? pendFiles.map((f) => `\n\n--- ${f.name} ---\n\`\`\`\n${f.text}\n\`\`\``).join("") : "";
@@ -448,6 +530,7 @@ export default function ChatPage() {
 
     const history = [...turns, userTurn];
     setTurns(history);
+    saveConversationDraft(convId.current, "");
     setInput("");
     setPendImages([]);
     setPendFiles([]);
@@ -462,18 +545,21 @@ export default function ChatPage() {
     // the assistant turn on completion, and fires notifications - all of which
     // keep working if we navigate away. The completion effect above syncs the
     // transcript / clarification / error back into this page when relevant.
+    const selectedMode = modeOptionValue(cfg.mode);
     startRun(convId.current, {
       turns: history,
+      mode: selectedMode as Mode,
       notifications: cfg.notifications,
       body: {
         messages,
         proposers: activeProposers,
         aggregator: cfg.aggregator,
+        stageModels: cfg.stageModels,
         conversationId: convId.current,
         rounds: cfg.rounds,
         // Folder context only applies to plan pipelines (folder = plans only).
-        workdir: cfg.mode !== "normal" && cfg.folderMode ? cfg.workdir : "",
-        mode: cfg.mode,
+        workdir: cfg.folderMode ? cfg.workdir : "",
+        mode: selectedMode,
       },
     });
   }
@@ -508,11 +594,15 @@ export default function ChatPage() {
   function newChat() {
     setTurns([]);
     setError(null);
+    setErrorInfo(null);
     setOpenProposals(null);
+    setLiveOpen(false);
+    setInput("");
     setPendImages([]);
     setPendFiles([]);
     convId.current = newConvId();
     saveActiveId(convId.current); // keep refreshes pinned to the new chat
+    checkCliConnection();
   }
 
   // Folders to show in the dropdown: the active one (so it's always visible)
@@ -520,6 +610,11 @@ export default function ChatPage() {
   const displayFolders = cfg
     ? Array.from(new Set([...(cfg.folderMode && cfg.workdir ? [cfg.workdir] : []), ...cfg.recentFolders]))
     : [];
+
+  function retryLastUser() {
+    const last = [...turns].reverse().find((t) => t.role === "user");
+    if (last?.content) send(last.content);
+  }
 
   const bigSwitch = cfg && (
     <div className="inline-flex items-center gap-1 rounded-full bg-subtle p-1.5 shadow-sm">
@@ -595,6 +690,35 @@ export default function ChatPage() {
 
   return (
     <div className="mx-auto flex h-full max-w-4xl flex-col px-6">
+      {/* Same readiness check as first-run Onboarding, re-run each time a
+          conversation starts - warns instead of letting a run fail blind. */}
+      {cliDisconnected && (
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-red-500/40 bg-red-500/5 p-4 text-sm">
+          <div>
+            <span className="font-semibold text-red-500">Claude CLI not connected.</span>{" "}
+            <span className="text-muted">
+              {cliStatus?.claude.loggedIn === false
+                ? cliStatus.claude.authError || "Claude is not authenticated for headless use."
+                : cliStatus?.claude.path
+                  ? cliStatus.claude.error || "Found, but it won't run."
+                  : "Claude CLI was not found on this Mac."}
+            </span>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              onClick={checkCliConnection}
+              disabled={cliChecking}
+              className="rounded-full border border-red-500/40 px-4 py-2 font-medium text-red-500 transition hover:bg-red-500/10 disabled:opacity-50"
+            >
+              {cliChecking ? "Checking…" : "Retry connection"}
+            </button>
+            <Link href="/settings" className="text-red-500 underline transition hover:text-red-400">
+              Settings
+            </Link>
+          </div>
+        </div>
+      )}
+
       {/* In a conversation: Back-to-History and a quick "New chat" starter. */}
       {turns.length > 0 && (
         <div className="flex items-center gap-2 pt-4">
@@ -646,51 +770,81 @@ export default function ChatPage() {
           <div className="mt-10 flex gap-4">
             <Avatar role="assistant" />
             <div className="min-w-0 flex-1">
-              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted">
-                <span className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-muted border-t-transparent" />
-                <span className="text-fg">{progress?.label ?? "Thinking…"}</span>
-                <span className="text-xs">
-                  {fmtElapsed(elapsed)}
-                  {progress?.total ? ` · step ${Math.min(progress.done + 1, progress.total)}/${progress.total}` : ""}
-                </span>
-              </div>
-              {progress?.agents && progress.agents.length > 0 && (
-                <div className="mt-2 flex flex-wrap gap-2">
-                  {progress.agents.map((a, i) => (
-                    <span
-                      key={i}
-                      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs ${
-                        a.status === "error"
-                          ? "border-red-500/50 text-red-500"
-                          : a.status === "done"
-                            ? "border-border text-muted"
-                            : "border-fg text-fg"
-                      }`}
-                    >
-                      {a.status === "running" ? (
-                        <span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
-                      ) : a.status === "done" ? (
-                        <CheckMiniIcon />
-                      ) : (
-                        <AlertIcon />
-                      )}
-                      {a.model}
+              {liveOpen && canLive ? (
+                <>
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted">
+                    <span className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-muted border-t-transparent" />
+                    <span className="text-fg">{progress?.label ?? "Thinking…"}</span>
+                    <ModeBadge mode={runMode} />
+                    <span className="text-xs">{fmtElapsed(elapsed)}</span>
+                    <div className="ml-auto flex items-center gap-3">
+                      <button onClick={() => setLiveOpen(false)} className="text-muted transition hover:text-fg">
+                        Minimize
+                      </button>
+                      <button onClick={() => stopRun(convId.current)} className="text-muted transition hover:text-fg">
+                        Stop
+                      </button>
+                    </div>
+                  </div>
+                  <LiveRunView mode={runMode} stages={activeRun?.stages ?? []} elapsed={fmtElapsed(elapsed)} />
+                </>
+              ) : (
+                <>
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted">
+                    <span className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-muted border-t-transparent" />
+                    <span className="text-fg">{progress?.label ?? "Thinking…"}</span>
+                    <ModeBadge mode={runMode} />
+                    <span className="text-xs">
+                      {fmtElapsed(elapsed)}
+                      {progress?.total ? ` · step ${Math.min(progress.done + 1, progress.total)}/${progress.total}` : ""}
                     </span>
-                  ))}
-                </div>
+                    <div className="ml-auto flex items-center gap-3">
+                      {canLive && (
+                        <button onClick={expandLiveRun} className="font-medium text-fg transition hover:text-muted">
+                          Expand
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  {progress?.agents && progress.agents.length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {progress.agents.map((a, i) => (
+                        <span
+                          key={i}
+                          className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs ${
+                            a.status === "error"
+                              ? "border-red-500/50 text-red-500"
+                              : a.status === "done"
+                                ? "border-border text-muted"
+                                : "border-fg text-fg"
+                          }`}
+                        >
+                          {a.status === "running" ? (
+                            <span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                          ) : a.status === "done" ? (
+                            <CheckMiniIcon />
+                          ) : (
+                            <AlertIcon />
+                          )}
+                          {a.model}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {progress?.total ? (
+                    <div className="mt-2 h-1.5 w-full max-w-sm overflow-hidden rounded-full bg-subtle">
+                      <div
+                        className="h-full rounded-full bg-fg transition-all duration-500"
+                        style={{ width: `${Math.round((progress.done / progress.total) * 100)}%` }}
+                      />
+                    </div>
+                  ) : null}
+                </>
               )}
-              {progress?.total ? (
-                <div className="mt-2 h-1.5 w-full max-w-sm overflow-hidden rounded-full bg-subtle">
-                  <div
-                    className="h-full rounded-full bg-fg transition-all duration-500"
-                    style={{ width: `${Math.round((progress.done / progress.total) * 100)}%` }}
-                  />
-                </div>
-              ) : null}
             </div>
           </div>
         )}
-        {error && <div className="mt-10 rounded-2xl border border-border bg-subtle p-5">{error}</div>}
+        {error && <ErrorBanner error={error} info={errorInfo} onRetry={retryLastUser} />}
         </div>
         {!atBottom && turns.length > 0 && (
           <button
@@ -754,53 +908,31 @@ export default function ChatPage() {
           <div className="flex shrink-0 items-center gap-1.5">
             <div className="relative shrink-0" ref={planRef}>
               <button
-                onClick={() => {
-                  setPlanHover(null);
-                  setPlanOpen((o) => !o);
-                }}
-                title="How the agents work - Normal answer, or Attack/Relay planning pipelines (saved as .md)."
-                className={`${CONTROL} inline-flex items-center gap-1.5 ${cfg.mode !== "normal" ? "!border-fg text-fg" : "text-muted hover:text-fg"}`}
+                onClick={() => setPlanOpen((o) => !o)}
+                title="How the agents work - Normal/Relay/Recon planning pipelines (plans saved as .md; in Chat they answer normally)."
+                className={`${CONTROL} inline-flex items-center gap-1.5 !border-fg text-fg`}
               >
-                Mode · {MODE_OPTIONS.find((o) => o.value === cfg.mode)!.label}
+                Mode · {MODE_OPTIONS.find((o) => o.value === modeOptionValue(cfg.mode))!.label}
                 <ChevronIcon />
               </button>
               {planOpen && (
-                <div
-                  className="absolute bottom-full right-0 z-10 mb-2 w-44 rounded-2xl border border-border bg-bg p-1.5 shadow-lg"
-                  onMouseLeave={() => setPlanHover(null)}
-                >
-                  {/* Folders are for planning, so Normal isn't offered there. */}
-                  {MODE_OPTIONS.filter((o) => !cfg.folderMode || o.value !== "normal").map((o) => (
+                <div className="absolute bottom-full right-0 z-10 mb-2 w-44 rounded-2xl border border-border bg-bg p-1.5 shadow-lg">
+                  {MODE_OPTIONS.map((o) => (
                     <button
                       key={o.value}
-                      onMouseEnter={() => setPlanHover(o.value)}
                       onClick={() => {
                         setMode(o.value);
                         setPlanOpen(false);
                       }}
                       title={o.blurb}
                       className={`flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm transition hover:bg-subtle ${
-                        cfg.mode === o.value ? "font-semibold text-fg" : "text-muted"
+                        modeOptionValue(cfg.mode) === o.value ? "font-semibold text-fg" : "text-muted"
                       }`}
                     >
                       <span>{o.label}</span>
-                      {cfg.mode === o.value && <span className="text-orange-500">●</span>}
+                      {modeOptionValue(cfg.mode) === o.value && <span className="text-orange-500">●</span>}
                     </button>
                   ))}
-                  {/* Big floating preview to the left of the menu (grows upward). */}
-                  {(() => {
-                    const o = MODE_OPTIONS.find((x) => x.value === planHover);
-                    if (!o?.img) return null;
-                    return (
-                      <div className="pointer-events-none absolute bottom-0 left-full z-20 ml-3 w-72">
-                        <img
-                          src={o.img}
-                          alt={`${o.label} pipeline`}
-                          className="w-full rounded-xl border border-border bg-white shadow-2xl"
-                        />
-                      </div>
-                    );
-                  })()}
                 </div>
               )}
             </div>
@@ -836,6 +968,7 @@ export default function ChatPage() {
 
       {/* Composer */}
       <div className="pb-3 pt-2">
+        <ComposerLimitWarning providers={activeLimitProviders} />
         <div className="rounded-2xl border border-border bg-subtle p-3 focus-within:border-fg">
           {hasAttachments && (
             <div className="mb-2 flex flex-wrap gap-2 px-1">
@@ -922,16 +1055,38 @@ export default function ChatPage() {
             >
               <MicIcon />
             </button>
-            <button
-              onClick={() => send()}
-              disabled={busy || (!input.trim() && !hasAttachments)}
-              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-fg text-bg transition hover:opacity-80 disabled:opacity-30"
-              aria-label="Send"
-            >
-              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z" />
-              </svg>
-            </button>
+            {busy ? (
+              canLive ? (
+                <button
+                  onClick={liveOpen ? () => setLiveOpen(false) : expandLiveRun}
+                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-fg text-bg transition hover:opacity-80"
+                  aria-label={liveOpen ? "Minimize generation process" : "Expand generation process"}
+                  title={liveOpen ? "Minimize" : "Expand"}
+                >
+                  {liveOpen ? <CollapseIcon /> : <ExpandIcon />}
+                </button>
+              ) : (
+                <button
+                  onClick={() => stopRun(convId.current)}
+                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-fg text-bg transition hover:opacity-80"
+                  aria-label="Stop"
+                  title="Stop"
+                >
+                  <StopIcon />
+                </button>
+              )
+            ) : (
+              <button
+                onClick={() => send()}
+                disabled={!input.trim() && !hasAttachments}
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-fg text-bg transition hover:opacity-80 disabled:opacity-30"
+                aria-label="Send"
+              >
+                <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z" />
+                </svg>
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -1015,12 +1170,7 @@ function debugDump(turn: Turn): string {
   const ps = turn.proposals ?? [];
   if (ps.length) {
     const errs = ps.filter((p) => p.error).length;
-    const labels = ps.map((p) => p.model).join(" ");
-    const mode = /finalize|harden/.test(labels)
-      ? "relay"
-      : /synthesize|review of/.test(labels)
-        ? "attack"
-        : "normal";
+    const mode = inferMode(turn);
     out.push(`Mode: ${mode} · ${ps.length} stage${ps.length === 1 ? "" : "s"} · ${errs} error${errs === 1 ? "" : "s"}`, "");
     out.push("## Stages", "");
     ps.forEach((p, i) => {
@@ -1038,6 +1188,15 @@ function debugDump(turn: Turn): string {
   const finalLen = turn.content?.trim().length ?? 0;
   out.push("## Final answer", "", finalLen ? `present - ${n(finalLen)} chars` : "(empty)");
   return out.join("\n");
+}
+
+function errorSummary(info: ErrorInfo | undefined, fallback: string | undefined): string {
+  const provider = info?.provider === "claude" ? "Claude" : info?.provider === "codex" ? "Codex" : "Agent";
+  if (info?.kind === "rate-limit") return `${provider} usage limit reached`;
+  if (info?.kind === "auth") return `${provider} CLI not authenticated`;
+  if (info?.kind === "timeout") return "Agent timed out";
+  if (info?.kind === "stopped") return "Run stopped";
+  return fallback?.split("\n")[0]?.slice(0, 120) || "Stage failed";
 }
 
 // A ready-to-paste prompt for handing the produced plan file(s) to a coding
@@ -1204,6 +1363,7 @@ function Message({
           </div>
         )}
         <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-sm">
+          <ModeBadge mode={inferMode(turn)} />
           <CopyButton text={turn.content} label="Copy" />
           {hasProposals && (
             <button onClick={onToggle} className="text-muted transition hover:text-fg">
@@ -1230,7 +1390,7 @@ function Message({
           {turn.usage && turn.usage.total_tokens > 0 && (
             <span
               className="ml-auto text-muted"
-              title={`${turn.usage.prompt_tokens.toLocaleString()} in · ${turn.usage.completion_tokens.toLocaleString()} out — across all agents + the fuse`}
+              title={`${turn.usage.prompt_tokens.toLocaleString()} in · ${turn.usage.completion_tokens.toLocaleString()} out — across all agents + the fuse${formatLimitDeltas(turn.limits, turn.usage.total_tokens) ? ` · ${formatLimitDeltas(turn.limits, turn.usage.total_tokens)}` : ""}`}
             >
               {turn.usage.total_tokens.toLocaleString()} tokens
             </span>
@@ -1243,14 +1403,24 @@ function Message({
                 <summary className="flex cursor-pointer items-center justify-between gap-2 text-sm font-medium">
                   <span className={p.error ? "text-red-500" : "text-muted"}>
                     {p.provider}/{p.model}
-                    {p.error ? " - error" : ""}
+                    {p.error ? ` - ${errorSummary(p.errorInfo, p.error)}` : ""}
                   </span>
                   <span className="text-xs">
                     <CopyButton text={p.error ? p.error : p.content} />
                   </span>
                 </summary>
                 <div className="mt-3">
-                  {p.error ? <p className="text-red-500">{p.error}</p> : <Markdown>{p.content}</Markdown>}
+                  {p.error ? (
+                    <div className="space-y-2">
+                      <p className="font-medium text-red-500">{errorSummary(p.errorInfo, p.error)}</p>
+                      <details className="text-sm text-muted">
+                        <summary className="cursor-pointer">Raw CLI output</summary>
+                        <pre className="mt-2 max-h-60 overflow-auto whitespace-pre-wrap break-words font-mono text-xs">{p.error}</pre>
+                      </details>
+                    </div>
+                  ) : (
+                    <Markdown>{p.content}</Markdown>
+                  )}
                 </div>
               </details>
             ))}
@@ -1399,6 +1569,32 @@ function MicIcon() {
   );
 }
 
+function ExpandIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M8 3H3v5M16 3h5v5M21 16v5h-5M3 16v5h5" />
+      <path d="M3 3l6 6M21 3l-6 6M21 21l-6-6M3 21l6-6" />
+    </svg>
+  );
+}
+
+function CollapseIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M9 3v6H3M15 3v6h6M15 21v-6h6M9 21v-6H3" />
+      <path d="M9 9 3 3M15 9l6-6M15 15l6 6M9 15l-6 6" />
+    </svg>
+  );
+}
+
+function StopIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="7" y="7" width="10" height="10" rx="1.5" />
+    </svg>
+  );
+}
+
 // Circular progress ring for context-window usage.
 function ContextRing({ pct }: { pct: number }) {
   const r = 8;
@@ -1440,4 +1636,3 @@ function Checkbox({ on }: { on: boolean }) {
     </span>
   );
 }
-

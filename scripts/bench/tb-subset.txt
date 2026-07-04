@@ -1,0 +1,10 @@
+# Terminal-Bench 2.1 fixed subset — one task-id per line (blank lines / # ignored).
+# Pick ONCE, spanning categories (SWE / sysadmin / data / ML / security), then
+# never resample. Populate from:  tb list --dataset terminal-bench-core==2.1
+#
+# Example (replace with real task-ids after listing the dataset):
+# fix-git-merge-conflict
+# build-python-wheel
+# grep-log-anomaly
+# sqlite-schema-migration
+# train-tiny-classifier

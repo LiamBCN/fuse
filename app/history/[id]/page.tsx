@@ -3,15 +3,25 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import Markdown from "@/components/Markdown";
+import ModeBadge from "@/components/ModeBadge";
+import { formatLimitDeltas } from "@/lib/limit-format";
 import {
+  inferMode,
   loadConversation,
   saveActiveId,
   type StoredConversation,
 } from "@/lib/conversations";
-import type { ImagePart, Proposal } from "@/lib/types";
+import type { ErrorInfo, ImagePart, Proposal } from "@/lib/types";
 
 const dataUrl = (img: ImagePart) => `data:${img.mediaType};base64,${img.dataBase64}`;
 const fmtNum = (n: number) => n.toLocaleString();
+const errorSummary = (info: ErrorInfo | undefined, fallback: string | undefined) => {
+  const provider = info?.provider === "claude" ? "Claude" : info?.provider === "codex" ? "Codex" : "Agent";
+  if (info?.kind === "rate-limit") return `${provider} usage limit reached`;
+  if (info?.kind === "auth") return `${provider} CLI not authenticated`;
+  if (info?.kind === "timeout") return "Agent timed out";
+  return fallback?.split("\n")[0]?.slice(0, 120) || "Stage failed";
+};
 
 export default function HistoryDetailPage() {
   const params = useParams<{ id: string }>();
@@ -84,7 +94,15 @@ export default function HistoryDetailPage() {
             </div>
           ) : (
             <div key={i} id={`turn-${i}`} className="scroll-mt-6">
-              <div className="text-xs font-semibold uppercase tracking-wide text-muted">Fused answer</div>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="text-xs font-semibold uppercase tracking-wide text-muted">Fused answer</div>
+                <ModeBadge mode={inferMode(t)} />
+                {t.usage && t.limits && (
+                  <span className="text-xs text-muted">
+                    {formatLimitDeltas(t.limits, t.usage.total_tokens)}
+                  </span>
+                )}
+              </div>
               <div className="mt-2">
                 <Markdown>{t.content}</Markdown>
               </div>
@@ -118,7 +136,9 @@ function AgentCard({ p }: { p: Proposal }) {
           {p.provider}/{p.model}
         </span>
         {failed ? (
-          <span className="rounded-full bg-subtle px-2 py-0.5 text-xs text-muted">error</span>
+          <span className="rounded-full bg-subtle px-2 py-0.5 text-xs text-muted">
+            {errorSummary(p.errorInfo, p.error)}
+          </span>
         ) : (
           <span className="text-xs text-muted">
             {fmtNum(p.usage.prompt_tokens)} in · {fmtNum(p.usage.completion_tokens)} out ·{" "}
@@ -128,7 +148,13 @@ function AgentCard({ p }: { p: Proposal }) {
       </summary>
       <div className="mt-3 border-t border-border pt-3">
         {failed ? (
-          <p className="text-sm text-muted">{p.error}</p>
+          <div className="space-y-2">
+            <p className="text-sm font-medium text-red-500">{errorSummary(p.errorInfo, p.error)}</p>
+            <details className="text-sm text-muted">
+              <summary className="cursor-pointer">Raw CLI output</summary>
+              <pre className="mt-2 max-h-60 overflow-auto whitespace-pre-wrap break-words font-mono text-xs">{p.error}</pre>
+            </details>
+          </div>
         ) : (
           <Markdown>{p.content}</Markdown>
         )}

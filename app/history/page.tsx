@@ -2,14 +2,17 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import ModeBadge from "@/components/ModeBadge";
+import { formatPercent, totalSessionDelta } from "@/lib/limit-format";
 import {
+  inferMode,
   listConversations,
   deleteConversation,
   saveActiveId,
   clearActiveId,
   type StoredConversation,
 } from "@/lib/conversations";
-import { isRunning, runningConvIds, runsVersion, subscribeRuns } from "@/lib/chat-runtime";
+import { getRun, isRunning, runningConvIds, runsVersion, subscribeRuns } from "@/lib/chat-runtime";
 
 const fmtDate = (ms: number) =>
   new Date(ms).toLocaleString(undefined, {
@@ -18,6 +21,9 @@ const fmtDate = (ms: number) =>
     hour: "numeric",
     minute: "2-digit",
   });
+
+const conversationLimitPct = (c: StoredConversation) =>
+  c.turns.reduce((sum, turn) => sum + totalSessionDelta(turn.limits), 0);
 
 export default function HistoryPage() {
   const [convs, setConvs] = useState<StoredConversation[] | null>(null);
@@ -84,7 +90,9 @@ export default function HistoryPage() {
           {convs.map((c) => {
             const userTurns = c.turns.filter((t) => t.role === "user").length;
             const lastAssistant = [...c.turns].reverse().find((t) => t.role === "assistant");
+            const running = getRun(c.id);
             const preview = lastAssistant?.content.replace(/\s+/g, " ").slice(0, 140);
+            const limitPct = conversationLimitPct(c);
             return (
               <div
                 key={c.id}
@@ -95,10 +103,17 @@ export default function HistoryPage() {
                 <button onClick={() => resume(c.id)} className="min-w-0 flex-1 text-left" title="Resume this conversation">
                   <div className="flex items-center gap-3">
                     <span className="truncate text-lg font-medium">{c.title}</span>
+                    {lastAssistant && <ModeBadge mode={inferMode(lastAssistant)} />}
+                    {limitPct > 0 && (
+                      <span className="inline-flex shrink-0 rounded-full border border-border px-2 py-0.5 text-xs text-muted">
+                        ≈{formatPercent(limitPct)} 5h
+                      </span>
+                    )}
                     {isRunning(c.id) && (
                       <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-fg px-2 py-0.5 text-xs font-medium text-fg">
                         <span className="h-2.5 w-2.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
                         Generating…
+                        <ModeBadge mode={running?.mode} className="border-current text-current" />
                       </span>
                     )}
                   </div>

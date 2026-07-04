@@ -14,3 +14,12 @@ npm-debug.log*
 
 # Compiled on-device voice transcriber (built by electron/build-voice.js)
 /electron/voice/fuse-transcribe
+
+# Plan-mode benchmark artifacts (scripts/bench-plan-modes.sh)
+/scripts/bench/out
+
+# Scratch plan files dropped in the repo root by tooling (auto-generated)
+/fuse-plan-*.md
+
+# Published benchmark result exports live here on purpose — keep them tracked.
+!/bench/results/

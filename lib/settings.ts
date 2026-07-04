@@ -8,6 +8,14 @@ export { DEFAULT_CONFIG } from "./types";
 
 const STORAGE_KEY = "fuse.config.v1";
 
+function clientMirrorConfig(cfg: FuseConfig): FuseConfig {
+  return {
+    ...cfg,
+    claudeOauthToken: undefined,
+    claudeOauthTokenSet: !!cfg.claudeOauthTokenSet || !!cfg.claudeOauthToken,
+  };
+}
+
 export async function loadConfig(): Promise<FuseConfig> {
   try {
     const res = await fetch("/api/settings", { cache: "no-store" });
@@ -27,9 +35,10 @@ export async function loadConfig(): Promise<FuseConfig> {
 }
 
 export async function saveConfig(cfg: FuseConfig): Promise<void> {
+  const mirror = clientMirrorConfig(cfg);
   if (typeof window !== "undefined") {
     try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(mirror));
     } catch {
       /* ignore quota */
     }

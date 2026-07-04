@@ -17,17 +17,27 @@ export const PROVIDERS: ProviderMeta[] = [
   {
     id: "claude-cli",
     label: "Claude",
-    // "default" = the CLI's own default model; the tier aliases (sonnet/opus/
-    // haiku) always resolve to the latest of each tier - all future-proof. Full
-    // version ids also work but get stale.
-    defaultModels: ["default", "sonnet", "opus", "haiku"],
+    // "default" = the CLI's own default model. Claude Code also accepts
+    // aliases (fable/opus/sonnet/haiku) plus full model ids.
+    defaultModels: [
+      "default",
+      "fable",
+      "opus",
+      "sonnet",
+      "haiku",
+      "claude-fable-5",
+      "claude-opus-4-8",
+      "claude-sonnet-5",
+      "claude-haiku-4-5",
+      "claude-haiku-4-5-20251001",
+    ],
   },
   {
     id: "codex-cli",
     label: "Codex",
-    // "default" lets Codex pick the model your login allows (explicit ids like
-    // gpt-5-codex are rejected on a ChatGPT-account login).
-    defaultModels: ["default"],
+    // "default" lets Codex pick the model your login allows. The explicit
+    // slugs below are the current Codex-recommended models.
+    defaultModels: ["default", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"],
   },
 ];
 

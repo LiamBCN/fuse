@@ -2,8 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { runMoa, type ModelRef } from "@/lib/moa";
 import { runPlan } from "@/lib/plan";
 import { appendUsage } from "@/lib/db";
+import { AgentFailedError, RunStoppedError, classifyCliError, registerRun } from "@/lib/run-control";
+import { diffLimitSnapshots, fetchAllLimits } from "@/lib/limits";
 import type { ChatMessage } from "@/lib/providers";
-import type { Mode, Usage } from "@/lib/types";
+import type { ErrorInfo, LimitSnapshot, Mode, StageModelMap, Usage, UsageLimitDeltas } from "@/lib/types";
 import type { UsageItem } from "@/lib/db";
 
 export const runtime = "nodejs";
@@ -20,6 +22,27 @@ const sumUsage = (items: UsageItem[]): Usage =>
     { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
   );
 
+const latestCodexThreadId = (items: UsageItem[]): string | undefined =>
+  [...items].reverse().find((item) => item.provider === "codex-cli" && item.sessionId)?.sessionId;
+
+async function captureLimitDeltas(
+  before: LimitSnapshot | null,
+  items: UsageItem[],
+): Promise<{ deltas?: UsageLimitDeltas; snapshot?: LimitSnapshot }> {
+  if (!items.length) return {};
+  const after = await fetchAllLimits({ force: true, codexThreadId: latestCodexThreadId(items) }).catch(() => null);
+  return {
+    deltas: diffLimitSnapshots(before, after),
+    snapshot: after ?? undefined,
+  };
+}
+
+function resetFromLimits(info: ErrorInfo, limits: LimitSnapshot): number | undefined {
+  const provider = info.provider;
+  if (provider) return limits[provider]?.session?.resetsAt ?? undefined;
+  return limits.claude.session?.resetsAt ?? limits.codex.session?.resetsAt ?? undefined;
+}
+
 interface ChatBody {
   messages: ChatMessage[];
   proposers: ModelRef[];
@@ -28,6 +51,7 @@ interface ChatBody {
   rounds?: number;
   workdir?: string;
   mode?: Mode;
+  stageModels?: StageModelMap;
 }
 
 export async function POST(req: NextRequest) {
@@ -38,10 +62,18 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const { messages, proposers, aggregator, conversationId, rounds, workdir, mode } = body;
+  const { messages, proposers, aggregator, conversationId, rounds, workdir, mode, stageModels } = body;
+  const convKey = conversationId ?? "default";
+  const selectedMode: Mode = mode === "fast" || mode === "relay" || mode === "recon" ? mode : "fast";
   if (!messages?.length) return NextResponse.json({ error: "No messages" }, { status: 400 });
   if (!proposers?.length) return NextResponse.json({ error: "Select at least one agent" }, { status: 400 });
   if (!aggregator?.model) return NextResponse.json({ error: "Select an aggregator model" }, { status: 400 });
+
+  const ac = new AbortController();
+  const unregister = registerRun(convKey, ac);
+  const onReqAbort = () => ac.abort();
+  req.signal.addEventListener("abort", onReqAbort);
+  if (req.signal.aborted) ac.abort();
 
   // Stream progress as Server-Sent Events, then a final result/error event.
   const encoder = new TextEncoder();
@@ -50,30 +82,61 @@ export async function POST(req: NextRequest) {
       const send = (obj: unknown) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
       const onProgress = (done: number, total: number, label: string, agents?: unknown) =>
         send({ type: "progress", done, total, label, agents });
+      const onStage = (stages: unknown) => send({ type: "stage", stages });
+      const limitBefore = await fetchAllLimits().catch(() => null);
       try {
-        if (mode === "attack" || mode === "relay") {
-          const result = await runPlan(messages, proposers, aggregator, mode, workdir || undefined, onProgress);
+        if (workdir) {
+          const result = await runPlan(messages, proposers, aggregator, selectedMode, workdir, onProgress, onStage, stageModels, ac.signal);
+          const { deltas } = await captureLimitDeltas(limitBefore, result.usageItems);
           if (result.usageItems.length) {
-            await appendUsage({ ts: Date.now(), conversationId: conversationId ?? "default", items: result.usageItems });
+            await appendUsage({ ts: Date.now(), conversationId: convKey, items: result.usageItems, limits: deltas });
           }
           const usage = sumUsage(result.usageItems);
           if (result.needsClarification) {
-            send({ type: "result", final: result.final, proposals: result.proposals, usage, needsClarification: true, questions: result.questions });
+            send({ type: "result", mode: selectedMode, final: result.final, proposals: result.proposals, usage, limits: deltas, needsClarification: true, questions: result.questions });
           } else {
-            send({ type: "result", final: result.final, proposals: result.proposals, usage, planPath: result.planPath, files: result.files });
+            send({ type: "result", mode: selectedMode, final: result.final, proposals: result.proposals, usage, limits: deltas, planPath: result.planPath, files: result.files });
           }
         } else {
-          const result = await runMoa(messages, proposers, aggregator, rounds ?? 1, workdir, onProgress);
+          const result = await runMoa(messages, proposers, aggregator, rounds ?? 1, workdir, onProgress, ac.signal);
+          const { deltas } = await captureLimitDeltas(limitBefore, result.usageItems);
           if (result.usageItems.length) {
-            await appendUsage({ ts: Date.now(), conversationId: conversationId ?? "default", items: result.usageItems });
+            await appendUsage({ ts: Date.now(), conversationId: convKey, items: result.usageItems, limits: deltas });
           }
-          send({ type: "result", final: result.final, proposals: result.proposals, usage: sumUsage(result.usageItems) });
+          send({ type: "result", mode: selectedMode, final: result.final, proposals: result.proposals, usage: sumUsage(result.usageItems), limits: deltas });
         }
       } catch (e: any) {
-        send({ type: "error", error: e?.message ?? String(e) });
+        ac.abort();
+        const items = e instanceof AgentFailedError || e instanceof RunStoppedError ? e.usageItems : [];
+        const { deltas, snapshot } = await captureLimitDeltas(limitBefore, items);
+        if (items.length) await appendUsage({ ts: Date.now(), conversationId: convKey, items, limits: deltas }).catch(() => {});
+        if (!(e instanceof RunStoppedError)) {
+          let info: ErrorInfo =
+            e instanceof AgentFailedError
+              ? e.info
+              : classifyCliError(e?.message ?? String(e));
+          if (info.kind === "rate-limit") {
+            const limits = snapshot ?? (await fetchAllLimits({ force: true }).catch(() => undefined));
+            if (limits) {
+              info = { ...info, limits, resetsAt: info.resetsAt ?? resetFromLimits(info, limits) };
+            }
+          }
+          try {
+            send({ type: "error", error: e?.message ?? String(e), info });
+          } catch {
+            /* client may already be gone */
+          }
+        }
       } finally {
-        controller.close();
+        req.signal.removeEventListener("abort", onReqAbort);
+        unregister();
+        try {
+          controller.close();
+        } catch {}
       }
+    },
+    cancel() {
+      ac.abort();
     },
   });
 

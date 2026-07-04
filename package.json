@@ -10,7 +10,8 @@
     "lint": "next lint",
     "electron:dev": "concurrently -k -n next,electron -c blue,magenta \"next dev -p 3030\" \"wait-on tcp:127.0.0.1:3030 && electron .\"",
     "dist": "next build && node electron/prepare.js && node electron/build-voice.js && electron-builder --mac",
-    "pack": "next build && node electron/prepare.js && node electron/build-voice.js && electron-builder --mac --dir"
+    "pack": "next build && node electron/prepare.js && node electron/build-voice.js && electron-builder --mac --dir",
+    "relaunch": "bash scripts/relaunch.sh"
   },
   "dependencies": {
     "highlight.js": "^11.11.1",

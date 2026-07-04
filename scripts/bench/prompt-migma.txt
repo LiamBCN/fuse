@@ -1,0 +1,14 @@
+We need to allow Migma users (for example the Migma Team) to have controlled access to internal tools, with role-based access to the Admin Panel.
+
+Requirements:
+
+1. Roles / access section. We need a section where we can grant a user access to the Admin Panel, choosing what kind of access they get:
+   - "admin": full access to the whole admin panel, including managing team members;
+   - "blog": access ONLY to the articles/blog page, where they can draft new articles and edit existing articles;
+   - "flow": access ONLY to the flow page and the redesign engine.
+
+2. Entry point. When a user with any of these roles logs into their account and clicks the user profile dropdown menu, they should see an "Admin panel" item. Clicking it redirects them to the panel according to their role. Users without any role must not see the item, and must also be blocked server-side from reaching the panel pages or its APIs.
+
+3. Team management. Managing team members (adding new members, removing them, changing their role) must only be possible by an admin, from inside the admin panel.
+
+4. Approach. Study the existing code first: reuse the existing auth, user model, existing API calls and the existing admin panel functionality wherever possible. Only create new API endpoints when necessary, and design everything so it introduces no security risks and no maintenance issues in the future.

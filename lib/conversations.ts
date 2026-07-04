@@ -3,7 +3,7 @@
 // server (durable JSON via /api/conversations) so history survives across
 // browsers and restarts. Only the "which chat am I on" pointer stays in
 // localStorage, since it's a per-window UI preference.
-import type { Turn } from "./types";
+import type { Mode, Turn } from "./types";
 
 export type { Turn } from "./types";
 
@@ -15,7 +15,21 @@ export interface StoredConversation {
   turns: Turn[];
 }
 
+export function inferMode(turn: Turn): Mode {
+  const savedMode = (turn as { mode?: string }).mode;
+  if (savedMode === "fast" || savedMode === "relay" || savedMode === "recon") return savedMode;
+  if (savedMode === "deep" || savedMode === "attack") return "recon";
+  if (savedMode === "relay2") return "relay";
+  if (savedMode === "normal") return "fast";
+  const labels = (turn.proposals ?? []).map((p) => p.model).join(" ").toLowerCase();
+  if (/verify-finalize/.test(labels)) return "fast";
+  if (/recon|synthesize|review of|verify/.test(labels)) return "recon";
+  if (/harden|finalize/.test(labels)) return "relay";
+  return "fast";
+}
+
 const ACTIVE_KEY = "fuse.activeConversation.v1";
+const DRAFT_PREFIX = "fuse.conversationDraft.v1:";
 const hasWindow = () => typeof window !== "undefined";
 
 export async function listConversations(): Promise<StoredConversation[]> {
@@ -67,6 +81,26 @@ export function clearActiveId(): void {
   if (!hasWindow()) return;
   try {
     window.localStorage.removeItem(ACTIVE_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+export function loadConversationDraft(id: string): string {
+  if (!hasWindow()) return "";
+  try {
+    return window.localStorage.getItem(DRAFT_PREFIX + id) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+export function saveConversationDraft(id: string, draft: string): void {
+  if (!hasWindow()) return;
+  try {
+    const key = DRAFT_PREFIX + id;
+    if (draft) window.localStorage.setItem(key, draft);
+    else window.localStorage.removeItem(key);
   } catch {
     /* ignore */
   }

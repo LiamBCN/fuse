@@ -1,14 +1,51 @@
 "use client";
 import { useEffect, useState } from "react";
-import { PROVIDERS, type ProviderMeta } from "@/lib/models";
+import { PROVIDERS } from "@/lib/models";
 import { loadConfig, saveConfig, DEFAULT_CONFIG, type FuseConfig } from "@/lib/settings";
-import type { ModelRef } from "@/lib/types";
+import type { Effort, ModelRef, StageKey } from "@/lib/types";
+
+const EFFORT_LEVELS: { key: Effort; label: string; hint: string }[] = [
+  { key: "low", label: "Low", hint: "Fastest, least reasoning" },
+  { key: "medium", label: "Medium", hint: "Balanced" },
+  { key: "high", label: "High", hint: "Most thorough, slower" },
+];
+
+const PLAN_STAGES: { key: StageKey; label: string; role: "A" | "B" | "Aggregator" }[] = [
+  { key: "clarify", label: "Clarify", role: "A" },
+  { key: "recon", label: "Recon", role: "Aggregator" },
+  { key: "draftA", label: "Draft A", role: "A" },
+  { key: "draftB", label: "Draft B", role: "B" },
+  { key: "harden", label: "Harden", role: "B" },
+  { key: "verify", label: "Verify", role: "Aggregator" },
+  { key: "synthesize", label: "Synthesize", role: "Aggregator" },
+  { key: "finalize", label: "Finalize", role: "Aggregator" },
+];
+
+const sameModel = (a: ModelRef, b: ModelRef) => a.provider === b.provider && a.model === b.model;
+
+function normalizeClaudeToken(input: string): string {
+  return input
+    .trim()
+    .replace(/^export\s+/, "")
+    .replace(/^CLAUDE_CODE_OAUTH_TOKEN=/, "")
+    .trim()
+    .replace(/^['"]|['"]$/g, "");
+}
+
+function roleDefault(cfg: FuseConfig, key: StageKey): ModelRef {
+  const a = cfg.proposers[0] ?? DEFAULT_CONFIG.proposers[0];
+  const b = cfg.proposers[1] ?? a;
+  if (key === "draftB" || key === "harden") return b;
+  if (key === "recon" || key === "verify" || key === "synthesize" || key === "finalize") return cfg.aggregator;
+  return a;
+}
 
 export default function SettingsPage() {
   const [cfg, setCfg] = useState<FuseConfig | null>(null);
   const [saved, setSaved] = useState(false);
   const [hasPicker, setHasPicker] = useState(false);
   const [notifPerm, setNotifPerm] = useState<string>("default");
+  const [tokenDraft, setTokenDraft] = useState("");
 
   useEffect(() => {
     loadConfig().then(setCfg);
@@ -30,6 +67,17 @@ export default function SettingsPage() {
     setTimeout(() => setSaved(false), 1200);
   }
 
+  async function saveClaudeToken(clear = false) {
+    const token = clear ? "" : normalizeClaudeToken(tokenDraft);
+    if (!clear && !token) return;
+    const next: FuseConfig = { ...cfg!, claudeOauthToken: token, claudeOauthTokenSet: !clear };
+    await saveConfig(next);
+    setCfg({ ...cfg!, claudeOauthToken: undefined, claudeOauthTokenSet: !clear });
+    setTokenDraft("");
+    setSaved(true);
+    setTimeout(() => setSaved(false), 1200);
+  }
+
   function setProposer(i: number, ref: ModelRef) {
     const proposers = [...cfg!.proposers];
     proposers[i] = ref;
@@ -41,7 +89,14 @@ export default function SettingsPage() {
   };
   const removeProposer = (i: number) => update({ ...cfg!, proposers: cfg!.proposers.filter((_, j) => j !== i) });
   const resetModels = () =>
-    update({ ...cfg!, proposers: DEFAULT_CONFIG.proposers, aggregator: DEFAULT_CONFIG.aggregator });
+    update({ ...cfg!, proposers: DEFAULT_CONFIG.proposers, aggregator: DEFAULT_CONFIG.aggregator, stageModels: {} });
+
+  function setStageModel(key: StageKey, ref?: ModelRef) {
+    const stageModels = { ...(cfg!.stageModels ?? {}) };
+    if (ref) stageModels[key] = ref;
+    else delete stageModels[key];
+    update({ ...cfg!, stageModels });
+  }
 
   // Setting a folder here also turns on folder mode; clearing turns it off.
   const setWorkdir = (workdir: string) => update({ ...cfg!, workdir, folderMode: !!workdir });
@@ -49,6 +104,9 @@ export default function SettingsPage() {
     const dir = await (window as any).fuse?.chooseFolder?.();
     if (dir) setWorkdir(dir);
   }
+
+  const reconResolved = (["recon", "verify", "synthesize"] as StageKey[]).map((key) => cfg.stageModels?.[key] ?? roleDefault(cfg, key));
+  const reconChainMismatch = !sameModel(reconResolved[0], reconResolved[1]) || !sameModel(reconResolved[0], reconResolved[2]);
 
   return (
     <div className="mx-auto h-full max-w-2xl overflow-y-auto px-6 py-12">
@@ -97,8 +155,42 @@ export default function SettingsPage() {
       </Section>
 
       <Section
+        title="Claude auth"
+        subtitle="For Fuse.app and other non-interactive launches, run `claude setup-token` in a logged-in terminal and paste the emitted OAuth token here. It uses your Claude subscription and is never shown again after saving."
+      >
+        <div className="flex gap-3">
+          <input
+            type="password"
+            value={tokenDraft}
+            onChange={(e) => setTokenDraft(e.target.value)}
+            placeholder={cfg.claudeOauthTokenSet ? "Token saved" : "CLAUDE_CODE_OAUTH_TOKEN=..."}
+            spellCheck={false}
+            className="flex-1 rounded-2xl border border-border bg-subtle px-4 py-3 text-base outline-none focus:border-fg"
+          />
+          <button
+            onClick={() => saveClaudeToken(false)}
+            disabled={!normalizeClaudeToken(tokenDraft)}
+            className="shrink-0 rounded-2xl border border-border px-4 text-base hover:border-fg disabled:opacity-30"
+          >
+            Save
+          </button>
+          {cfg.claudeOauthTokenSet && (
+            <button
+              onClick={() => saveClaudeToken(true)}
+              className="shrink-0 rounded-2xl border border-border px-4 text-base text-muted hover:text-fg"
+            >
+              Clear
+            </button>
+          )}
+        </div>
+        <p className="mt-3 text-sm text-muted">
+          Status: {cfg.claudeOauthTokenSet ? "token configured" : "no token saved"}
+        </p>
+      </Section>
+
+      <Section
         title="Agents"
-        subtitle="These all answer in parallel. Pick a model per agent - or type your own. Tip: use “default” or a tier alias (sonnet/opus/haiku) so it keeps working when providers update their models."
+        subtitle="These all answer in parallel. Pick a model per agent - or type your own. Exact Claude ids keep runs deterministic; aliases like sonnet/opus still work if you want provider defaults."
         action={
           <div className="flex items-center gap-4">
             <button onClick={resetModels} className="text-base text-muted underline hover:text-fg">Reset</button>
@@ -127,6 +219,74 @@ export default function SettingsPage() {
         <ModelPicker value={cfg.aggregator} onChange={(r) => update({ ...cfg, aggregator: r })} />
       </Section>
 
+      <Section
+        title="Effort"
+        subtitle="Reasoning effort applied to every model call - both Claude (--effort) and Codex (model_reasoning_effort). Higher is more thorough but slower. This is the default for all runs."
+      >
+        <div className="flex gap-3">
+          {EFFORT_LEVELS.map((level) => {
+            const active = cfg.effort === level.key;
+            return (
+              <button
+                key={level.key}
+                onClick={() => update({ ...cfg, effort: level.key })}
+                aria-pressed={active}
+                className={`flex-1 rounded-2xl border px-4 py-3 text-center transition ${
+                  active ? "border-fg bg-fg text-bg" : "border-border text-fg hover:border-fg"
+                }`}
+              >
+                <div className="text-base font-medium">{level.label}</div>
+                <div className={`mt-0.5 text-sm ${active ? "text-bg/70" : "text-muted"}`}>{level.hint}</div>
+              </button>
+            );
+          })}
+        </div>
+      </Section>
+
+      <Section
+        title="Plan stages"
+        subtitle="Optional overrides for folder-backed plan runs. A stage uses its role default unless you turn on an override here."
+      >
+        {reconChainMismatch && (
+          <p className="mb-4 rounded-2xl border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300">
+            Recon, Verify, and Synthesize do not share the same model. Fuse will run them as fresh stages instead of resuming one Claude session.
+          </p>
+        )}
+        <div className="space-y-3">
+          {PLAN_STAGES.map((stage) => {
+            const fallback = roleDefault(cfg, stage.key);
+            const override = cfg.stageModels?.[stage.key];
+            const enabled = !!override;
+            return (
+              <div key={stage.key} className="rounded-2xl border border-border bg-subtle p-4">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div>
+                    <div className="font-medium">{stage.label}</div>
+                    <div className="text-sm text-muted">
+                      Default: {stage.role} · {fallback.provider}/{fallback.model}
+                    </div>
+                  </div>
+                  <label className="flex shrink-0 items-center gap-2 text-sm text-muted">
+                    <input
+                      type="checkbox"
+                      checked={enabled}
+                      onChange={(e) => setStageModel(stage.key, e.target.checked ? fallback : undefined)}
+                    />
+                    Override
+                  </label>
+                </div>
+                {enabled && (
+                  <ModelPicker
+                    value={override ?? fallback}
+                    onChange={(r) => setStageModel(stage.key, r)}
+                  />
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </Section>
+
       <Section title="Notifications" subtitle="Play a sound + show a desktop alert when an agent needs input, or when a long task finishes while Fuse isn't focused.">
         <div className="flex items-center justify-between gap-4">
           <button
@@ -149,6 +309,47 @@ export default function SettingsPage() {
               Allow…
             </button>
           )}
+        </div>
+      </Section>
+
+      <Section
+        title="Benchmarks"
+        subtitle="Publish finished benchmark runs into a local Fuse clone (git), so results are versioned and everyone who pulls sees them in History. Leave empty in dev to use this checkout."
+      >
+        <div className="flex gap-3">
+          <input
+            value={cfg.benchResultsRepo ?? ""}
+            onChange={(e) => update({ ...cfg, benchResultsRepo: e.target.value })}
+            placeholder="/Users/you/projects/fuse"
+            spellCheck={false}
+            className="flex-1 rounded-2xl border border-border bg-subtle px-4 py-3 text-base outline-none focus:border-fg"
+          />
+          {hasPicker && (
+            <button
+              onClick={async () => {
+                const dir = await (window as any).fuse?.chooseFolder?.();
+                if (dir) update({ ...cfg!, benchResultsRepo: dir });
+              }}
+              className="shrink-0 rounded-2xl border border-border px-4 text-base hover:border-fg"
+            >
+              Choose…
+            </button>
+          )}
+        </div>
+        <div className="mt-4 flex items-center justify-between gap-4">
+          <button
+            onClick={() => update({ ...cfg, benchAutoPublish: !cfg.benchAutoPublish })}
+            role="switch"
+            aria-checked={!!cfg.benchAutoPublish}
+            className={`relative h-7 w-12 shrink-0 rounded-full transition ${cfg.benchAutoPublish ? "bg-fg" : "bg-border"}`}
+          >
+            <span
+              className={`absolute top-1 h-5 w-5 rounded-full bg-bg transition-all ${cfg.benchAutoPublish ? "left-6" : "left-1"}`}
+            />
+          </button>
+          <span className="flex-1 text-base">
+            {cfg.benchAutoPublish ? "Auto-publish finished runs" : "Auto-publish off"}
+          </span>
         </div>
       </Section>
 
@@ -208,7 +409,8 @@ function GitHubIcon() {
 
 function ModelPicker({ value, onChange }: { value: ModelRef; onChange: (r: ModelRef) => void }) {
   const provider = PROVIDERS.find((p) => p.id === value.provider) ?? PROVIDERS[0];
-  const listId = `models-${provider.id}`;
+  const custom = !provider.defaultModels.includes(value.model);
+  const modelSelectValue = custom ? "__custom__" : value.model;
   return (
     <div className="flex flex-1 gap-3">
       <select
@@ -223,19 +425,29 @@ function ModelPicker({ value, onChange }: { value: ModelRef; onChange: (r: Model
           <option key={p.id} value={p.id}>{p.label}</option>
         ))}
       </select>
-      {/* Editable: pick a suggested model or type any id the CLI accepts. */}
-      <input
-        value={value.model}
-        list={listId}
-        onChange={(e) => onChange({ ...value, model: e.target.value })}
-        placeholder="model id"
-        className="flex-1 rounded-2xl border border-border bg-subtle px-4 py-3 text-base outline-none focus:border-fg"
-      />
-      <datalist id={listId}>
+      <select
+        value={modelSelectValue}
+        onChange={(e) => {
+          const model = e.target.value;
+          onChange({ ...value, model: model === "__custom__" ? "" : model });
+        }}
+        className="min-w-0 flex-1 rounded-2xl border border-border bg-subtle px-4 py-3 text-base outline-none focus:border-fg"
+      >
         {provider.defaultModels.map((m) => (
-          <option key={m} value={m} />
+          <option key={m} value={m}>
+            {m}
+          </option>
         ))}
-      </datalist>
+        <option value="__custom__">Custom model id…</option>
+      </select>
+      {(custom || value.model === "") && (
+        <input
+          value={value.model}
+          onChange={(e) => onChange({ ...value, model: e.target.value })}
+          placeholder="custom model id"
+          className="min-w-0 flex-1 rounded-2xl border border-border bg-subtle px-4 py-3 text-base outline-none focus:border-fg"
+        />
+      )}
     </div>
   );
 }

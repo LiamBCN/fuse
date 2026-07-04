@@ -8,7 +8,17 @@ import { promises as fs } from "fs";
 import { accessSync, constants, existsSync } from "fs";
 import os from "os";
 import path from "path";
-import type { ActivityFn, CallResult, ChatMessage } from "./providers";
+import type { ActivityFn, CallResult, ChatMessage, CliSandbox, CliSession } from "./providers";
+import { readSettings } from "./settings-store";
+import type { Effort } from "./types";
+
+// Per-call CLI options threaded down from callModel (lib/providers.ts).
+export interface CliOpts {
+  session?: CliSession; // claude-cli: --session-id / --resume
+  reasoningEffort?: Effort; // per-call effort override → claude --effort / codex model_reasoning_effort
+  sandbox?: CliSandbox; // codex-cli: override the default sandbox for this call
+  signal?: AbortSignal;
+}
 
 const HOME = os.homedir();
 
@@ -61,11 +71,52 @@ function resolveBin(name: string, candidates: (string | undefined)[]): string | 
   return null;
 }
 
-const childEnv = () => ({
-  ...process.env,
-  HOME,
-  PATH: [...EXTRA_DIRS, process.env.PATH || ""].join(":"),
-});
+const childEnv = (extra?: Record<string, string>) => {
+  const { CLAUDE_CODE_OAUTH_TOKEN: _dropClaudeToken, ...base } = process.env;
+  return {
+    ...base,
+    HOME,
+    PATH: [...EXTRA_DIRS, process.env.PATH || ""].join(":"),
+    ...extra,
+  };
+};
+
+const CLAUDE_AUTH_MESSAGE = "Claude CLI not authenticated - run `claude setup-token` and paste the token in Settings.";
+
+function isClaudeAuthFailure(s: string | undefined): boolean {
+  // NB: do NOT key off `apiKeySource:"none"`. Subscription/OAuth logins have no
+  // API key, so the CLI's init event always reports apiKeySource:"none" even when
+  // fully authenticated. Since runClaude scans the whole stream-json stdout, that
+  // line would relabel any is_error (e.g. a 429 session limit) as an auth failure
+  // and misdirect users to `claude setup-token`. The genuine logged-out signals
+  // below are what actually distinguish "not authenticated".
+  return !!s && /(not logged in|please run \/login|authentication_failed|invalid api key)/i.test(s);
+}
+
+async function claudeOauthToken(): Promise<string | undefined> {
+  const envToken = process.env.CLAUDE_CODE_OAUTH_TOKEN?.trim();
+  if (envToken) return envToken;
+  try {
+    return (await readSettings()).claudeOauthToken?.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function claudeEnv(): Promise<Record<string, string> | undefined> {
+  const token = await claudeOauthToken();
+  return token ? { CLAUDE_CODE_OAUTH_TOKEN: token } : undefined;
+}
+
+// The user's configured reasoning effort (Settings ▸ Effort). Applied to every
+// model call as the default; a per-call opts.reasoningEffort still wins.
+async function configuredEffort(): Promise<Effort> {
+  try {
+    return (await readSettings()).effort;
+  } catch {
+    return "high";
+  }
+}
 
 // Flatten the conversation into a single prompt (+ optional system text). The
 // CLIs are single-shot, so multi-turn history is rendered as a transcript.
@@ -102,6 +153,8 @@ const MAX_TIMEOUT_MS = num(process.env.FUSE_CLI_MAX_TIMEOUT_MS, 3_600_000); // 6
 interface RunOpts {
   // Called with every raw stdout/stderr chunk - used for liveness/progress.
   onData?: (chunk: string) => void;
+  env?: Record<string, string>;
+  signal?: AbortSignal;
 }
 
 // Spawn a process, optionally feed stdin, and collect stdout/stderr. Times out
@@ -114,34 +167,55 @@ function run(
   opts: RunOpts = {},
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { cwd, env: childEnv() });
+    if (opts.signal?.aborted) {
+      reject(new Error("Run stopped."));
+      return;
+    }
+
+    const child = spawn(bin, args, { cwd, env: childEnv(opts.env), detached: true });
     let stdout = "";
     let stderr = "";
     let settled = false;
 
-    let idleTimer: ReturnType<typeof setTimeout>;
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    let maxTimer: ReturnType<typeof setTimeout> | undefined;
+    const killTree = () => {
+      if (!child.pid) return;
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          /* process may already be gone */
+        }
+      }
+    };
+    const onAbort = () => fail("Run stopped.");
     const done = (fn: () => void) => {
       if (settled) return;
       settled = true;
-      clearTimeout(idleTimer);
-      clearTimeout(maxTimer);
+      if (idleTimer) clearTimeout(idleTimer);
+      if (maxTimer) clearTimeout(maxTimer);
+      opts.signal?.removeEventListener("abort", onAbort);
       fn();
     };
     const fail = (msg: string) => {
-      child.kill("SIGKILL");
+      killTree();
       done(() => reject(new Error(msg)));
     };
     const resetIdle = () => {
-      clearTimeout(idleTimer);
+      if (idleTimer) clearTimeout(idleTimer);
       idleTimer = setTimeout(
         () => fail(`No output for ${Math.round(IDLE_TIMEOUT_MS / 1000)}s - the CLI appears stuck.`),
         IDLE_TIMEOUT_MS,
       );
     };
-    const maxTimer = setTimeout(
+    maxTimer = setTimeout(
       () => fail(`Exceeded the ${Math.round(MAX_TIMEOUT_MS / 1000)}s hard limit.`),
       MAX_TIMEOUT_MS,
     );
+    opts.signal?.addEventListener("abort", onAbort);
     resetIdle();
 
     // Every chunk is a sign of life: reset the idle clock and feed liveness.
@@ -173,6 +247,23 @@ function run(
 
 const estTokens = (s: string) => Math.ceil((s?.length ?? 0) / 4);
 
+function withoutMaxTurns(args: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--max-turns") {
+      i++;
+      continue;
+    }
+    out.push(args[i]);
+  }
+  return out;
+}
+
+function isUnknownMaxTurnsError(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return /--max-turns/.test(msg) && /(unknown|unrecognized|unsupported|unexpected|invalid).*(option|argument|flag)/i.test(msg);
+}
+
 // Use the configured folder if it exists; otherwise a neutral temp dir.
 async function pickCwd(workdir?: string): Promise<{ cwd: string; scoped: boolean }> {
   if (workdir && existsSync(workdir)) return { cwd: workdir, scoped: true };
@@ -186,11 +277,13 @@ async function runClaude(
   workdir?: string,
   planMode?: boolean,
   onActivity?: ActivityFn,
+  opts?: CliOpts,
 ): Promise<CallResult> {
   const bin = resolveBin("claude", CLAUDE_CANDIDATES);
   if (!bin) throw new Error("Claude CLI not found. Install it or set FUSE_CLAUDE_BIN.");
   const { system, prompt } = render(messages);
   const { cwd, scoped } = await pickCwd(workdir);
+  const env = await claudeEnv();
 
   // stream-json + partial messages → the CLI emits one JSON event per line and
   // streams the answer token-by-token. That gives us a real heartbeat (so the
@@ -198,12 +291,24 @@ async function runClaude(
   const args = ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages"];
   // "default"/empty → let the CLI use its own default model (future-proof).
   if (model && model !== "default") args.push("--model", model);
+  // Reasoning effort (Settings ▸ Effort; a per-call override wins). Claude Code
+  // maps --effort to its extended-thinking budget. Verified on CLI 2.1.199.
+  args.push("--effort", opts?.reasoningEffort ?? (await configuredEffort()));
   if (system) args.push("--append-system-prompt", system);
+  // Session reuse across pipeline stages: pin a fresh session's UUID, or resume
+  // one a prior stage created. A resumed process replays the transcript
+  // (including tool results), and --append-system-prompt swaps cleanly per
+  // turn, so a later stage keeps every file the earlier stage read in context
+  // while running under its own stage prompt (both verified against 2.1.198).
+  if (opts?.session?.resume) args.push("--resume", opts.session.resume);
+  else if (opts?.session?.id) args.push("--session-id", opts.session.id);
   if (scoped && planMode) {
     // Plan mode: read the folder AND create plan files (Markdown/notes) via
     // Write - but no Edit or Bash, so it can't surgically edit existing source
-    // or run commands.
-    args.push("--max-turns", "40", "--allowedTools", "Read", "Glob", "Grep", "Write");
+    // or run commands. 80 turns (up from 40): the grounded modes' recon/verify
+    // stages fact-check many claims with lots of small Read/Grep calls, so a
+    // drafter-sized budget would starve them and fail-fast the whole run.
+    args.push("--max-turns", "80", "--allowedTools", "Read", "Glob", "Grep", "Write");
   } else if (scoped) {
     // Full access to the folder - all tools, edits, and shell - like running
     // `claude` in that directory and approving everything.
@@ -226,6 +331,7 @@ async function runClaude(
   // Live progress: count assistant text as it streams in. JSON objects are
   // line-delimited, so buffer across chunk boundaries before parsing.
   let streamed = 0;
+  let tail = "";
   let buf = "";
   const onData: RunOpts["onData"] = onActivity
     ? (chunk) => {
@@ -240,7 +346,8 @@ async function runClaude(
             const inner = ev?.type === "stream_event" ? ev.event : null;
             if (inner?.type === "content_block_delta" && inner.delta?.type === "text_delta" && inner.delta.text) {
               streamed += inner.delta.text.length;
-              onActivity({ chars: streamed });
+              tail = (tail + inner.delta.text).slice(-1500);
+              onActivity({ chars: streamed, tail });
             }
           } catch {
             /* partial or non-event line */
@@ -249,7 +356,21 @@ async function runClaude(
       }
     : undefined;
 
-  const { stdout } = await run(bin, args, prompt, cwd, { onData });
+  let stdout: string;
+  try {
+    ({ stdout } = await run(bin, args, prompt, cwd, { onData, env, signal: opts?.signal }));
+  } catch (e) {
+    if (isClaudeAuthFailure(e instanceof Error ? e.message : String(e))) throw new Error(CLAUDE_AUTH_MESSAGE);
+    if (!isUnknownMaxTurnsError(e)) throw e;
+    try {
+      ({ stdout } = await run(bin, withoutMaxTurns(args), prompt, cwd, { onData, env, signal: opts?.signal }));
+    } catch (retryError) {
+      if (isClaudeAuthFailure(retryError instanceof Error ? retryError.message : String(retryError))) {
+        throw new Error(CLAUDE_AUTH_MESSAGE);
+      }
+      throw retryError;
+    }
+  }
 
   // The final `result` event carries the answer + usage (same shape the old
   // --output-format json returned at the top level).
@@ -265,7 +386,11 @@ async function runClaude(
     }
   }
   if (!data) throw new Error(`Unexpected claude output: ${stdout.slice(0, 200)}`);
-  if (data.is_error) throw new Error(data.result || "claude CLI error");
+  if (data.is_error) {
+    const msg = data.result || "claude CLI error";
+    if (isClaudeAuthFailure(msg) || isClaudeAuthFailure(stdout)) throw new Error(CLAUDE_AUTH_MESSAGE);
+    throw new Error(msg);
+  }
 
   const u = data.usage ?? {};
   const prompt_tokens =
@@ -274,6 +399,7 @@ async function runClaude(
   return {
     content: data.result ?? "",
     usage: { prompt_tokens, completion_tokens, total_tokens: prompt_tokens + completion_tokens },
+    sessionId: typeof data.session_id === "string" ? data.session_id : undefined,
   };
 }
 
@@ -283,8 +409,9 @@ async function runCodex(
   model: string,
   messages: ChatMessage[],
   workdir?: string,
-  _planMode?: boolean,
+  planMode?: boolean,
   onActivity?: ActivityFn,
+  opts?: CliOpts,
 ): Promise<CallResult> {
   const bin = resolveBin("codex", CODEX_CANDIDATES);
   if (!bin) throw new Error("Codex CLI not found. Install it or set FUSE_CODEX_BIN.");
@@ -295,16 +422,22 @@ async function runCodex(
   // Keep the output file out of the (possibly user-owned) folder.
   await fs.mkdir(WORKDIR, { recursive: true });
   const outFile = path.join(WORKDIR, `codex-${Date.now()}-${codexSeq++}.txt`);
-  // Folder set → workspace-write so it can create plan files (and, in normal
-  // chat, implement). No folder → read-only.
-  const sandbox = scoped ? "workspace-write" : "read-only";
-  // medium reasoning is plenty and far faster - Codex's default (xhigh) can
-  // take minutes on long answers and blow past the timeout.
-  const args = ["exec", "--skip-git-repo-check", "--sandbox", sandbox, "-C", cwd, "-o", outFile, "-c", "model_reasoning_effort=medium"];
+  // Folder set → workspace-write so drafts can create scratch plan files (and,
+  // in normal chat, implement). Plan-mode closing stages can override to
+  // read-only because their job is verification/finalization, not file writes.
+  const sandbox = opts?.sandbox ?? (scoped && planMode ? "workspace-write" : scoped ? "workspace-write" : "read-only");
+  // Reasoning effort follows the user's Settings ▸ Effort (default high); a
+  // per-call opts.reasoningEffort still overrides. We deliberately don't expose
+  // Codex's own xhigh here — it can take minutes and blow past the idle timeout.
+  const effort = opts?.reasoningEffort ?? (await configuredEffort());
+  // --json → line-delimited events on stdout: thread.started carries the
+  // resumable thread_id, turn.completed carries REAL token usage (the answer
+  // still comes from -o outFile, which stays authoritative).
+  const args = ["exec", "--json", "--skip-git-repo-check", "--sandbox", sandbox, "-C", cwd, "-o", outFile, "-c", `model_reasoning_effort=${effort}`];
   if (model && model !== "default") args.push("-m", model);
   args.push(full);
 
-  // Codex prints its reasoning/progress to stdout+stderr as it works, so the
+  // Codex prints its progress events to stdout+stderr as it works, so the
   // running byte count is a fine "still alive" signal (the answer itself is read
   // from outFile below).
   let streamed = 0;
@@ -316,15 +449,33 @@ async function runCodex(
     : undefined;
 
   try {
-    await run(bin, args, null, cwd, { onData });
+    const { stdout } = await run(bin, args, null, cwd, { onData, signal: opts?.signal });
+
+    // Pull real usage + the session/thread id out of the JSONL event stream.
+    let usage: { input_tokens?: number; cached_input_tokens?: number; output_tokens?: number } | null = null;
+    let threadId: string | undefined;
+    for (const line of stdout.split("\n")) {
+      const s = line.trim();
+      if (!s.startsWith("{")) continue;
+      try {
+        const ev = JSON.parse(s);
+        if (ev?.type === "thread.started" && typeof ev.thread_id === "string") threadId = ev.thread_id;
+        if (ev?.type === "turn.completed" && ev.usage) usage = ev.usage;
+      } catch {
+        /* partial or non-event line */
+      }
+    }
+
     const content = (await fs.readFile(outFile, "utf8")).trim();
+    // Real numbers when --json reported them; length/4 estimates as fallback so
+    // usage never silently reads as zero if the event shape drifts. Codex's
+    // input_tokens already includes cached_input_tokens (OpenAI convention).
+    const prompt_tokens = usage ? (usage.input_tokens ?? 0) : estTokens(full);
+    const completion_tokens = usage ? (usage.output_tokens ?? 0) : estTokens(content);
     return {
       content,
-      usage: {
-        prompt_tokens: estTokens(full),
-        completion_tokens: estTokens(content),
-        total_tokens: estTokens(full) + estTokens(content),
-      },
+      usage: { prompt_tokens, completion_tokens, total_tokens: prompt_tokens + completion_tokens },
+      sessionId: threadId,
     };
   } finally {
     fs.unlink(outFile).catch(() => {});
@@ -338,10 +489,11 @@ export async function runCli(
   workdir?: string,
   planMode?: boolean,
   onActivity?: ActivityFn,
+  opts?: CliOpts,
 ): Promise<CallResult> {
   return provider === "claude-cli"
-    ? runClaude(model, messages, workdir, planMode, onActivity)
-    : runCodex(model, messages, workdir, planMode, onActivity);
+    ? runClaude(model, messages, workdir, planMode, onActivity, opts)
+    : runCodex(model, messages, workdir, planMode, onActivity, opts);
 }
 
 // --- Setup / health checks --------------------------------------------------
@@ -351,6 +503,9 @@ export interface CliStatus {
   ok: boolean;
   path: string | null;
   version?: string;
+  loggedIn?: boolean;
+  tokenConfigured?: boolean;
+  authError?: string;
   error?: string;
 }
 
@@ -378,6 +533,62 @@ function probeVersion(bin: string): Promise<string> {
   });
 }
 
+function probeClaudeAuthOnce(
+  bin: string,
+  args: string[],
+  env: Record<string, string> | undefined,
+): Promise<{ loggedIn: boolean; error?: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(bin, args, { cwd: os.tmpdir(), env: childEnv(env) });
+    let out = "";
+    let err = "";
+    const finish = (loggedIn: boolean, error?: string) => resolve({ loggedIn, error });
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish(false, "Timed out checking Claude auth");
+    }, 25_000);
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (err += d));
+    child.on("error", (e) => {
+      clearTimeout(timer);
+      finish(false, e.message);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      const text = `${out}\n${err}`.trim();
+      if (isClaudeAuthFailure(text)) return finish(false, CLAUDE_AUTH_MESSAGE);
+      let data: any = null;
+      for (const line of out.split("\n")) {
+        const s = line.trim();
+        if (!s.startsWith("{")) continue;
+        try {
+          data = JSON.parse(s);
+        } catch {
+          /* skip */
+        }
+      }
+      if (data?.is_error) {
+        const msg = data.result || text || "Claude auth check failed";
+        return finish(!isClaudeAuthFailure(msg) && code === 0, msg);
+      }
+      if (code === 0) return finish(true);
+      finish(false, text || `exited with code ${code}`);
+    });
+  });
+}
+
+async function probeClaudeAuth(
+  bin: string,
+  env: Record<string, string> | undefined,
+): Promise<{ loggedIn: boolean; error?: string }> {
+  const withTools = ["-p", "Reply with exactly ok.", "--output-format", "json", "--tools", ""];
+  const first = await probeClaudeAuthOnce(bin, withTools, env);
+  if (first.error && /--tools|unknown|unrecognized|unsupported|unexpected|invalid/i.test(first.error)) {
+    return probeClaudeAuthOnce(bin, ["-p", "Reply with exactly ok.", "--output-format", "json"], env);
+  }
+  return first;
+}
+
 async function probeCli(name: string, candidates: (string | undefined)[]): Promise<CliStatus> {
   const bin = resolveBin(name, candidates);
   if (!bin) return { ok: false, path: null };
@@ -390,9 +601,36 @@ async function probeCli(name: string, candidates: (string | undefined)[]): Promi
   }
 }
 
+async function probeClaudeCli(): Promise<CliStatus> {
+  const bin = resolveBin("claude", CLAUDE_CANDIDATES);
+  if (!bin) return { ok: false, path: null, loggedIn: false, tokenConfigured: !!(await claudeOauthToken()) };
+  try {
+    const out = await probeVersion(bin);
+    const env = await claudeEnv();
+    const auth = await probeClaudeAuth(bin, env);
+    return {
+      ok: true,
+      path: bin,
+      version: out.split("\n")[0].slice(0, 100),
+      loggedIn: auth.loggedIn,
+      tokenConfigured: !!env?.CLAUDE_CODE_OAUTH_TOKEN,
+      authError: auth.loggedIn ? undefined : auth.error,
+    };
+  } catch (e: any) {
+    // Found on disk but won't run (broken install, perms, etc.).
+    return {
+      ok: false,
+      path: bin,
+      loggedIn: false,
+      tokenConfigured: !!(await claudeOauthToken()),
+      error: e?.message ?? String(e),
+    };
+  }
+}
+
 export async function detectClis(): Promise<{ claude: CliStatus; codex: CliStatus }> {
   const [claude, codex] = await Promise.all([
-    probeCli("claude", CLAUDE_CANDIDATES),
+    probeClaudeCli(),
     probeCli("codex", CODEX_CANDIDATES),
   ]);
   return { claude, codex };

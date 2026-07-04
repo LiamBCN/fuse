@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { readSettings, writeSettings } from "@/lib/settings-store";
+import { readSettings, redactSettings, writeSettings } from "@/lib/settings-store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 // GET /api/settings - current config (keys + models). Local app only.
 export async function GET() {
   try {
-    return NextResponse.json(await readSettings());
+    return NextResponse.json(redactSettings(await readSettings()));
   } catch (e: any) {
     return NextResponse.json({ error: e?.message ?? String(e) }, { status: 500 });
   }
@@ -22,7 +22,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
   try {
-    return NextResponse.json(await writeSettings(body));
+    return NextResponse.json(redactSettings(await writeSettings(body)));
   } catch (e: any) {
     return NextResponse.json({ error: e?.message ?? String(e) }, { status: 500 });
   }

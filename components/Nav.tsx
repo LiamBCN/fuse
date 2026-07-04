@@ -4,12 +4,14 @@ import { usePathname } from "next/navigation";
 import { clearActiveId } from "@/lib/conversations";
 import ThemeToggle from "./ThemeToggle";
 import Logo from "./Logo";
+import { NavLimitMeter } from "./LimitMeter";
 
 const LINKS = [
   { href: "/", label: "Chat" },
   { href: "/history", label: "History" },
   { href: "/pipeline", label: "How it works" },
   { href: "/stats", label: "Stats" },
+  { href: "/benchmarks", label: "Benchmarks" },
   { href: "/settings", label: "Settings" },
 ];
 
@@ -47,6 +49,9 @@ export default function Nav() {
             </Link>
           );
         })}
+        <div className="ml-3">
+          <NavLimitMeter />
+        </div>
         <div className="ml-3">
           <ThemeToggle />
         </div>

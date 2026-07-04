@@ -2,6 +2,7 @@
 // ./data/usage.json. No external DB - "store locally" taken literally.
 import { promises as fs } from "fs";
 import path from "path";
+import type { UsageLimitDeltas } from "./types";
 
 // Writable data location. The packaged Electron app sets FUSE_DATA_DIR to a
 // per-user folder (the app bundle itself is read-only); in dev it falls back
@@ -17,12 +18,14 @@ export interface UsageItem {
   completion_tokens: number;
   total_tokens: number;
   cost: number;
+  sessionId?: string;
 }
 
 export interface UsageRecord {
   ts: number; // epoch ms
   conversationId: string;
   items: UsageItem[];
+  limits?: UsageLimitDeltas;
 }
 
 async function ensure() {
